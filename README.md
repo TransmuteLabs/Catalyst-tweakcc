@@ -1,3 +1,36 @@
+> ## Catalyst fork of tweakcc
+>
+> This is a fork of [Piebald-AI/tweakcc](https://github.com/Piebald-AI/tweakcc),
+> kept for one reason: **Claude Code 2.1.242 split its bundle**, and the
+> published tweakcc cannot read the new shape.
+>
+> Up to 2.1.241 the whole CLI was a single ~28 MB `cli` module inside the Bun
+> container. From 2.1.242 it is an ESM entry of ~20 KB plus ~1400
+> `chunk-<hash>.js` modules. Upstream extracts the entry alone, so every patch
+> locator searches a stub and finds nothing — the failure looks like a broken
+> patch set rather than a broken unpacker.
+>
+> **What this fork changes:** extraction walks the module table and joins the
+> entry with its chunks, separated by a `/*__tweakcc_module_boundary_<n>__*/`
+> comment; repack splits on the boundary and writes each module back, checking
+> both the part count and every ordinal before anything is written. The public
+> signatures stay Buffer in / Buffer out, so patch scripts need no changes. On
+> 2.1.241 and earlier the selection is a single module and behaviour is
+> byte-identical to upstream.
+>
+> `tools/probe-roundtrip.ts` is the regression check: extract, repack, extract
+> again, compare.
+>
+> Everything else here is upstream's work under its MIT licence. Upstream is
+> actively maintained; this fork tracks it via the `upstream` remote and carries
+> as little of its own as possible, so their releases stay easy to merge.
+>
+> Consumed by
+> [Catalyst-CC-Patch](https://github.com/TransmuteLabs/Catalyst-CC-Patch),
+> which pins it by commit.
+
+---
+
 <div>
 <div align="right">
 <a href="https://piebald.ai"><img width="200" top="20" align="right" src="https://github.com/Piebald-AI/.github/raw/main/Wordmark.svg"></a>
