@@ -235,34 +235,124 @@ function isClaudeModule(moduleName: string): boolean {
   );
 }
 
-/**
- * Code-split chunk emitted next to the entry module.
- *
- * Claude Code <= 2.1.241 shipped the whole bundle as the single `cli` module.
- * 2.1.242 split it into an ESM entry (~20 KB) plus ~1400 `chunk-<hash>.js`
- * modules, so the entry alone no longer contains any of the code the patches
- * look for. The bundle we hand to a patch script is therefore the entry plus
- * every chunk.
- *
- * The name pattern is esbuild/Bun code-splitting output. If a future version
- * renames chunks, this predicate stops matching and the selection collapses
- * back to the entry alone -- patches then fail to find their locators, which
- * is a loud failure, not silent corruption.
- */
-const CHUNK_MODULE_RE = /(^|\/)chunk-[0-9a-z]+\.js$/;
+/** Bun marks JavaScript source modules with this loader id. */
+const JS_LOADER = 1;
 
 /**
- * True if the module is part of the entry's bundle graph.
+ * Import specifier, in the forms the bundle writes them.
  *
- * Deliberately narrower than `loader === 1` (any JS): the images also carry
- * small standalone helper scripts (`image-processor.js`, `audio-capture.js`,
- * `url-handler.js`, `computer-use-*.js`, `hooks-worker.js`). Those are not
- * part of the CLI bundle, and pulling them in would let a patch locator match
- * inside an unrelated script. On <= 2.1.241 this predicate selects exactly
- * one module, so behaviour there is unchanged.
+ * Covers `import ... from"x"`, `export ... from"x"`, bare `import"x"`, dynamic
+ * `import("x")` and `require("x")`. The specifier is captured whole and
+ * filtered afterwards by whether it names a module in the table, rather than by
+ * its shape: 2.1.245 writes them ABSOLUTE (`"/$bunfs/root/chunk-vxt9ppez.js"`)
+ * even though relative ones would be the obvious guess, and a shape assumption
+ * here is the same mistake as a name pattern — it silently selects nothing.
+ * A specifier naming an npm package is simply not in the table.
  */
-function isBundleModule(moduleName: string): boolean {
-  return isClaudeModule(moduleName) || CHUNK_MODULE_RE.test(moduleName);
+const SPECIFIER_RE =
+  /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["']([^"'\n]+)["']/g;
+
+/**
+ * Resolves a specifier to a module name.
+ *
+ * An absolute specifier already IS the module name, so it is returned as-is
+ * and the caller's table lookup decides whether it exists. A relative one is
+ * joined onto the importing module's directory.
+ */
+function resolveSpecifier(fromModuleName: string, spec: string): string | null {
+  if (!spec.startsWith('.')) return spec;
+  const slash = fromModuleName.lastIndexOf('/');
+  if (slash < 0) return null;
+  const parts = fromModuleName.slice(0, slash).split('/');
+  for (const segment of spec.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') {
+      if (parts.length <= 1) return null;
+      parts.pop();
+      continue;
+    }
+    parts.push(segment);
+  }
+  return parts.join('/');
+}
+
+/**
+ * The entry module together with everything it imports, transitively.
+ *
+ * Claude Code <= 2.1.241 shipped the whole bundle as the single `cli` module.
+ * 2.1.242 split it into an ESM entry of ~20 KB plus ~1400 chunks, so the entry
+ * alone no longer holds any of the code a patch looks for.
+ *
+ * The set is taken FROM THE IMPORT GRAPH, not from a name pattern. The first
+ * version of this selected `chunk-<hash>.js`, which is what 2.1.242 emitted —
+ * and 2.1.246 renamed them to `_<number>.js` while keeping the old name for
+ * some, so the pattern caught 562 of 1409 modules and extraction returned a
+ * quarter of the bundle. A name is a fact about one release; the graph is a
+ * fact about the bundle.
+ *
+ * The walk is also what keeps the standalone helper scripts out
+ * (`image-processor.js`, `audio-capture.js`, `url-handler.js`,
+ * `computer-use-*.js`, `hooks-worker.js`): they are JavaScript, but nothing in
+ * the CLI graph imports them, and pulling them in would let a locator match
+ * inside an unrelated script. On <= 2.1.241 the entry imports nothing, so the
+ * closure is exactly one module and behaviour there is unchanged.
+ *
+ * Returned in module-table order. Extraction and repack both call this on the
+ * same binary, which is what lets the joined text be mapped back by position
+ * without any side-channel between the two.
+ */
+function collectBundleModules(
+  bunData: Buffer,
+  bunOffsets: BunOffsets,
+  moduleStructSize: number
+): Array<{ index: number; contents: Buffer }> {
+  const byName = new Map<string, { index: number; contents: Buffer }>();
+  const entries: string[] = [];
+
+  mapModules(bunData, bunOffsets, moduleStructSize, (module, name, index) => {
+    if (module.loader === JS_LOADER) {
+      byName.set(name, {
+        index,
+        contents: getStringPointerContent(bunData, module.contents),
+      });
+      if (isClaudeModule(name)) entries.push(name);
+    }
+    // Always undefined: mapModules stops at the first defined result, and this
+    // walk has to visit every module.
+    return undefined;
+  });
+
+  const seen = new Set<string>();
+  const queue = [...entries];
+  while (queue.length > 0) {
+    const name = queue.pop() as string;
+    if (seen.has(name)) continue;
+    const module = byName.get(name);
+    if (!module) continue;
+    seen.add(name);
+
+    const text = module.contents.toString('utf-8');
+    SPECIFIER_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = SPECIFIER_RE.exec(text)) !== null) {
+      const target = resolveSpecifier(name, match[1]);
+      // A specifier that resolves to something outside the table (an asset, a
+      // path this walk cannot model) is simply not a JS module to patch.
+      if (target !== null && byName.has(target) && !seen.has(target)) {
+        queue.push(target);
+      }
+    }
+  }
+
+  const selected = [...seen]
+    .map(name => byName.get(name) as { index: number; contents: Buffer })
+    .sort((a, b) => a.index - b.index);
+
+  debug(
+    `collectBundleModules: ${selected.length} of ${byName.size} JS modules reachable from the entry`
+  );
+
+  return selected;
 }
 
 /**
@@ -287,26 +377,15 @@ function moduleBoundary(index: number): string {
 const MODULE_BOUNDARY_SPLIT_RE =
   /\n\/\*__tweakcc_module_boundary_(\d+)__\*\/\n/;
 
-/**
- * Indices of the bundle modules, in module-table order.
- *
- * Extraction and repack both derive this list from the same binary with the
- * same predicate, which is what lets the joined text be mapped back by
- * position without carrying any side-channel between the two calls.
- */
+/** Indices of the bundle modules, in module-table order. */
 function collectBundleModuleIndices(
   bunData: Buffer,
   bunOffsets: BunOffsets,
   moduleStructSize: number
 ): number[] {
-  const indices: number[] = [];
-  mapModules(bunData, bunOffsets, moduleStructSize, (_module, name, index) => {
-    if (isBundleModule(name)) indices.push(index);
-    // Always undefined: mapModules stops at the first defined result, and this
-    // walk has to visit every module.
-    return undefined;
-  });
-  return indices;
+  return collectBundleModules(bunData, bunOffsets, moduleStructSize).map(
+    m => m.index
+  );
 }
 
 /**
@@ -914,20 +993,13 @@ export function extractClaudeJsFromNativeInstallation(
       `extractClaudeJsFromNativeInstallation: Got bunData, size=${bunData.length} bytes, moduleStructSize=${moduleStructSize}`
     );
 
-    // Module names are typically:
-    // - Unix/macOS: /$bunfs/root/cli, /$bunfs/root/chunk-<hash>.js
-    // - Windows:    B:/~BUN/root/cli, B:/~BUN/root/chunk-<hash>.js
-    const parts: Buffer[] = [];
-    mapModules(bunData, bunOffsets, moduleStructSize, (module, name, index) => {
-      if (isBundleModule(name)) {
-        const contents = getStringPointerContent(bunData, module.contents);
-        debug(
-          `extractClaudeJsFromNativeInstallation: bundle module ${index}: ${name}, contents length=${contents.length}`
-        );
-        parts.push(contents);
-      }
-      return undefined;
-    });
+    // The entry is `/$bunfs/root/cli` on POSIX and `B:/~BUN/root/cli` on
+    // Windows; everything else comes from following its imports.
+    const parts = collectBundleModules(
+      bunData,
+      bunOffsets,
+      moduleStructSize
+    ).map(m => m.contents);
 
     if (parts.length === 0 || (parts.length === 1 && parts[0].length === 0)) {
       debug(
