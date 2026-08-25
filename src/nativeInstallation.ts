@@ -1011,6 +1011,15 @@ export function reportBunCoverage(nativeInstallationPath: string): {
     };
     add(bunOffsets.modulesPtr);
     add(bunOffsets.compileExecArgvPtr);
+    // The OFFSETS struct and the trailer close the payload and are described by
+    // the format itself, so they are accounted for even though no pointer names
+    // them. Counting them as unaccounted-for would report a permanent gap that
+    // moves whenever the payload is repacked, drowning the kind of gap this is
+    // for: bytes the container carries and nothing explains.
+    spans.push([
+      Math.max(0, bunData.length - BUN_TRAILER.length - SIZEOF_OFFSETS),
+      bunData.length,
+    ]);
     mapModules(bunData, bunOffsets, moduleStructSize, module => {
       add(module.name);
       add(module.contents);
