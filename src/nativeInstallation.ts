@@ -236,6 +236,143 @@ function isClaudeModule(moduleName: string): boolean {
 }
 
 /**
+ * Code-split chunk emitted next to the entry module.
+ *
+ * Claude Code <= 2.1.241 shipped the whole bundle as the single `cli` module.
+ * 2.1.242 split it into an ESM entry (~20 KB) plus ~1400 `chunk-<hash>.js`
+ * modules, so the entry alone no longer contains any of the code the patches
+ * look for. The bundle we hand to a patch script is therefore the entry plus
+ * every chunk.
+ *
+ * The name pattern is esbuild/Bun code-splitting output. If a future version
+ * renames chunks, this predicate stops matching and the selection collapses
+ * back to the entry alone -- patches then fail to find their locators, which
+ * is a loud failure, not silent corruption.
+ */
+const CHUNK_MODULE_RE = /(^|\/)chunk-[0-9a-z]+\.js$/;
+
+/**
+ * True if the module is part of the entry's bundle graph.
+ *
+ * Deliberately narrower than `loader === 1` (any JS): the images also carry
+ * small standalone helper scripts (`image-processor.js`, `audio-capture.js`,
+ * `url-handler.js`, `computer-use-*.js`, `hooks-worker.js`). Those are not
+ * part of the CLI bundle, and pulling them in would let a patch locator match
+ * inside an unrelated script. On <= 2.1.241 this predicate selects exactly
+ * one module, so behaviour there is unchanged.
+ */
+function isBundleModule(moduleName: string): boolean {
+  return isClaudeModule(moduleName) || CHUNK_MODULE_RE.test(moduleName);
+}
+
+/**
+ * Separator used to hand several modules to a patch script as one text.
+ *
+ * The patch scripts operate on a single mutable string and know nothing about
+ * modules. Rather than teach all of them to iterate, the bundle modules are
+ * joined with this marker and split apart again on the way back. The marker is
+ * a JS comment (so it cannot change the meaning of the code around it), it
+ * carries the ordinal it precedes (so the split can verify the mapping instead
+ * of trusting position), and the leading/trailing newlines keep it off any
+ * line a patch might be editing.
+ *
+ * Note the joined text is NEVER parsed as one unit: concatenated ESM modules
+ * have duplicate imports and would not parse. Parse checks run per module,
+ * after the split.
+ */
+function moduleBoundary(index: number): string {
+  return `\n/*__tweakcc_module_boundary_${index}__*/\n`;
+}
+
+const MODULE_BOUNDARY_SPLIT_RE =
+  /\n\/\*__tweakcc_module_boundary_(\d+)__\*\/\n/;
+
+/**
+ * Indices of the bundle modules, in module-table order.
+ *
+ * Extraction and repack both derive this list from the same binary with the
+ * same predicate, which is what lets the joined text be mapped back by
+ * position without carrying any side-channel between the two calls.
+ */
+function collectBundleModuleIndices(
+  bunData: Buffer,
+  bunOffsets: BunOffsets,
+  moduleStructSize: number
+): number[] {
+  const indices: number[] = [];
+  mapModules(bunData, bunOffsets, moduleStructSize, (_module, name, index) => {
+    if (isBundleModule(name)) indices.push(index);
+    // Always undefined: mapModules stops at the first defined result, and this
+    // walk has to visit every module.
+    return undefined;
+  });
+  return indices;
+}
+
+/**
+ * Splits a patched bundle back into per-module contents.
+ *
+ * Returns a map from module index to new contents. A single-module bundle
+ * (<= 2.1.241) has no boundaries and maps straight onto the one index.
+ */
+function splitPatchedBundle(
+  bunData: Buffer,
+  bunOffsets: BunOffsets,
+  moduleStructSize: number,
+  patched: Buffer
+): Map<number, Buffer> {
+  const indices = collectBundleModuleIndices(
+    bunData,
+    bunOffsets,
+    moduleStructSize
+  );
+  const modified = new Map<number, Buffer>();
+
+  if (indices.length === 0) {
+    throw new Error(
+      'repackNativeInstallation: no bundle module found in the binary'
+    );
+  }
+  if (indices.length === 1) {
+    modified.set(indices[0], patched);
+    return modified;
+  }
+
+  const parts = patched.toString('utf-8').split(MODULE_BOUNDARY_SPLIT_RE);
+  // split() with one capture group yields [text, ord, text, ord, ..., text].
+  const texts: string[] = [];
+  const ordinals: number[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) texts.push(parts[i]);
+    else ordinals.push(Number(parts[i]));
+  }
+
+  // A patch that swallowed or duplicated a boundary would silently move code
+  // from one module into another, so the mapping is checked rather than
+  // assumed.
+  if (texts.length !== indices.length) {
+    throw new Error(
+      `repackNativeInstallation: bundle has ${indices.length} modules but the ` +
+        `patched text splits into ${texts.length}; a patch consumed or added a ` +
+        'module boundary'
+    );
+  }
+  for (let i = 0; i < ordinals.length; i++) {
+    if (ordinals[i] !== i + 1) {
+      throw new Error(
+        `repackNativeInstallation: module boundary ${i + 1} carries ordinal ` +
+          `${ordinals[i]}; the patched text is out of order`
+      );
+    }
+  }
+
+  for (let i = 0; i < indices.length; i++) {
+    modified.set(indices[i], Buffer.from(texts[i], 'utf-8'));
+  }
+  return modified;
+}
+
+/**
  * Detects the module struct size from the modules list byte length.
  * Returns SIZEOF_MODULE_NEW (52) or SIZEOF_MODULE_OLD (36).
  */
@@ -705,6 +842,66 @@ function getBunData(
  * real binary path here. This is handled at detection time in
  * `installationDetection.ts`.
  */
+/**
+ * Catalyst: per-module census of the embedded Bun container.
+ *
+ * Claude Code 2.1.242 split one 28 MB CommonJS module into an ESM entry plus
+ * ~800 `chunk-*.js` modules. Everything above this line was written when a
+ * single module WAS the product, so the tooling reads the entry and stops.
+ * Diagnosis needs module-level facts first: which module holds a given site,
+ * and whether a module carries bytecode next to its source — because patching
+ * source that a bytecode blob shadows would change nothing at runtime while
+ * every check still reported success.
+ */
+export function listBunModules(nativeInstallationPath: string): Array<{
+  index: number;
+  name: string;
+  contentsLength: number;
+  bytecodeLength: number;
+  sourcemapLength: number;
+  loader: number;
+  moduleFormat: number;
+}> | null {
+  try {
+    LIEF.logging.disable();
+    const binary = LIEF.parse(nativeInstallationPath);
+    const { bunOffsets, bunData, moduleStructSize } = getBunData(binary);
+    const out: Array<{
+      index: number;
+      name: string;
+      contentsLength: number;
+      bytecodeLength: number;
+      sourcemapLength: number;
+      loader: number;
+      moduleFormat: number;
+    }> = [];
+    mapModules(
+      bunData,
+      bunOffsets,
+      moduleStructSize,
+      (module, moduleName, index) => {
+        out.push({
+          index,
+          name: moduleName,
+          contentsLength: getStringPointerContent(bunData, module.contents)
+            .length,
+          bytecodeLength: getStringPointerContent(bunData, module.bytecode)
+            .length,
+          sourcemapLength: getStringPointerContent(bunData, module.sourcemap)
+            .length,
+          loader: module.loader,
+          moduleFormat: module.moduleFormat,
+        });
+        return undefined;
+      }
+    );
+    return out;
+  } catch (error) {
+    debug('listBunModules: Error:', error);
+    return null;
+  }
+}
+
 export function extractClaudeJsFromNativeInstallation(
   nativeInstallationPath: string
 ): Buffer | null {
@@ -717,42 +914,46 @@ export function extractClaudeJsFromNativeInstallation(
       `extractClaudeJsFromNativeInstallation: Got bunData, size=${bunData.length} bytes, moduleStructSize=${moduleStructSize}`
     );
 
-    const result = mapModules(
-      bunData,
-      bunOffsets,
-      moduleStructSize,
-      (module, moduleName, index) => {
+    // Module names are typically:
+    // - Unix/macOS: /$bunfs/root/cli, /$bunfs/root/chunk-<hash>.js
+    // - Windows:    B:/~BUN/root/cli, B:/~BUN/root/chunk-<hash>.js
+    const parts: Buffer[] = [];
+    mapModules(bunData, bunOffsets, moduleStructSize, (module, name, index) => {
+      if (isBundleModule(name)) {
+        const contents = getStringPointerContent(bunData, module.contents);
         debug(
-          `extractClaudeJsFromNativeInstallation: Module ${index}: ${moduleName}`
+          `extractClaudeJsFromNativeInstallation: bundle module ${index}: ${name}, contents length=${contents.length}`
         );
-
-        // Module name is typically:
-        // - Unix/macOS: /$bunfs/root/claude
-        // - Windows:    B:/~BUN/root/claude.exe
-        if (!isClaudeModule(moduleName)) return undefined;
-
-        const moduleContents = getStringPointerContent(
-          bunData,
-          module.contents
-        );
-
-        debug(
-          `extractClaudeJsFromNativeInstallation: Found claude module, contents length=${moduleContents.length}`
-        );
-
-        return moduleContents.length > 0 ? moduleContents : undefined;
+        parts.push(contents);
       }
-    );
+      return undefined;
+    });
 
-    if (result) {
-      return result;
+    if (parts.length === 0 || (parts.length === 1 && parts[0].length === 0)) {
+      debug(
+        'extractClaudeJsFromNativeInstallation: claude module not found in any module'
+      );
+
+      return null;
     }
 
+    // One module: hand back its bytes untouched, so images up to 2.1.241 go
+    // through byte-for-byte the same path as before.
+    if (parts.length === 1) {
+      return parts[0];
+    }
+
+    const joined: Buffer[] = [parts[0]];
+    for (let i = 1; i < parts.length; i++) {
+      joined.push(Buffer.from(moduleBoundary(i), 'utf-8'), parts[i]);
+    }
+    const bundle = Buffer.concat(joined);
+
     debug(
-      'extractClaudeJsFromNativeInstallation: claude module not found in any module'
+      `extractClaudeJsFromNativeInstallation: joined ${parts.length} bundle modules into ${bundle.length} bytes`
     );
 
-    return null;
+    return bundle;
   } catch (error) {
     debug(
       'extractClaudeJsFromNativeInstallation: Error during extraction:',
@@ -766,7 +967,9 @@ export function extractClaudeJsFromNativeInstallation(
 function rebuildBunData(
   bunData: Buffer,
   bunOffsets: BunOffsets,
-  modifiedClaudeJs: Buffer | null,
+  // Keyed by module index rather than by name: a split bundle has ~1400
+  // modules and the index is what both extraction and repack agree on.
+  modifiedModules: Map<number, Buffer> | null,
   moduleStructSize: number
 ): Buffer {
   // Phase 1: Collect all string data
@@ -785,16 +988,20 @@ function rebuildBunData(
   }> = [];
 
   // Use mapModules to iterate and collect module data
-  mapModules(bunData, bunOffsets, moduleStructSize, (module, moduleName) => {
+  mapModules(bunData, bunOffsets, moduleStructSize, (module, _name, index) => {
     const nameBytes = getStringPointerContent(bunData, module.name);
 
-    // Check if this is claude.js and we have modified contents
-    let contentsBytes: Buffer;
-    if (modifiedClaudeJs && isClaudeModule(moduleName)) {
-      contentsBytes = modifiedClaudeJs;
-    } else {
-      contentsBytes = getStringPointerContent(bunData, module.contents);
-    }
+    // Patched contents for this module, or the original bytes.
+    //
+    // Bytecode is copied through unchanged, including for modified modules.
+    // That is deliberate: patched 2.1.239 images keep the full 215 MB
+    // bytecode blob next to an edited source and the edits do take effect, so
+    // a stale blob is discarded at load. If a future image ever runs stale
+    // bytecode instead, the symptom is the smoke gate failing to see patched
+    // behaviour, and the fix is to blank `bytecode` for modified modules here.
+    const patched = modifiedModules?.get(index);
+    const contentsBytes =
+      patched ?? getStringPointerContent(bunData, module.contents);
 
     const sourcemapBytes = getStringPointerContent(bunData, module.sourcemap);
     const bytecodeBytes = getStringPointerContent(bunData, module.bytecode);
@@ -1709,7 +1916,7 @@ export function repackNativeInstallation(
   const newBuffer = rebuildBunData(
     bunData,
     bunOffsets,
-    modifiedClaudeJs,
+    splitPatchedBundle(bunData, bunOffsets, moduleStructSize, modifiedClaudeJs),
     moduleStructSize
   );
 
