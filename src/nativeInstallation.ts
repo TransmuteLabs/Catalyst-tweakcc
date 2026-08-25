@@ -1175,6 +1175,8 @@ function rebuildBunData(
   const head = Buffer.from(bunData.subarray(0, offsetsOffset));
   const tableOffset = bunOffsets.modulesPtr.offset;
   const appended: Buffer[] = [];
+  const vacated: Array<[number, number]> = [];
+  const replacedIndices = new Set<number>();
   let appendedLength = 0;
   let replaced = 0;
 
@@ -1204,6 +1206,14 @@ function rebuildBunData(
     appended.push(replacement, NULL_TERMINATOR);
     appendedLength += replacement.length + 1;
 
+    if (module.contents.length > 0) {
+      vacated.push([
+        module.contents.offset,
+        module.contents.offset + module.contents.length,
+      ]);
+    }
+    replacedIndices.add(index);
+
     // `contents` is the second StringPointer in the struct, so eight bytes in.
     const field = tableOffset + index * moduleStructSize + 8;
     head.writeUInt32LE(newOffset, field);
@@ -1211,6 +1221,58 @@ function rebuildBunData(
     replaced += 1;
     return undefined;
   });
+
+  // The bytes a replaced module used to occupy are now unreferenced. Blanking
+  // them is not housekeeping. Left in place they keep a pre-patch copy of the
+  // code inside the shipped image, so anything that reasons about the image by
+  // scanning its bytes still finds the construct a patch had just removed --
+  // the pipeline's own verification does exactly that, and reported eight
+  // false failures on 2.1.246 before this existed.
+  //
+  // A span is blanked only where nothing else claims it: two identical modules
+  // may share one string, and a shared span belongs to whoever still points at
+  // it.
+  if (vacated.length > 0) {
+    const live: Array<[number, number]> = [];
+    const keep = (ptr: StringPointer) => {
+      // +1 for the null terminator, which belongs to the string it follows.
+      if (ptr.length > 0) live.push([ptr.offset, ptr.offset + ptr.length + 1]);
+    };
+    keep(bunOffsets.modulesPtr);
+    keep(bunOffsets.compileExecArgvPtr);
+    mapModules(bunData, bunOffsets, moduleStructSize, (module, _n, index) => {
+      keep(module.name);
+      keep(module.sourcemap);
+      keep(module.bytecode);
+      keep(module.moduleInfo);
+      keep(module.bytecodeOriginPath);
+      // A module that was not replaced still owns its contents where they are.
+      if (!replacedIndices.has(index)) keep(module.contents);
+      return undefined;
+    });
+    live.sort((a, b) => a[0] - b[0]);
+
+    let blanked = 0;
+    for (const [vStart, vEnd] of vacated) {
+      let cursor = vStart;
+      for (const [lStart, lEnd] of live) {
+        if (lEnd <= cursor) continue;
+        if (lStart >= vEnd) break;
+        if (lStart > cursor) {
+          const stop = Math.min(lStart, vEnd);
+          head.fill(0, cursor, stop);
+          blanked += stop - cursor;
+        }
+        cursor = Math.max(cursor, lEnd);
+        if (cursor >= vEnd) break;
+      }
+      if (cursor < vEnd) {
+        head.fill(0, cursor, vEnd);
+        blanked += vEnd - cursor;
+      }
+    }
+    debug(`rebuildBunData: ${blanked} vacated byte(s) blanked`);
+  }
 
   const byteCount = head.length + appendedLength;
   const offsets = Buffer.alloc(SIZEOF_OFFSETS);
