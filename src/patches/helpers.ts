@@ -390,8 +390,17 @@ export const findBoxComponent = (fileContents: string): string | undefined => {
   // tail is now `X.jsx("ink-box",{...,style:I,children:T})` (children is a prop,
   // and `style` is no longer the last prop) rather than the old
   // `X.createElement("ink-box",{...,style:I},T)`. Accept both forms.
+  //
+  // From CC 2.1.242 the bundle is code-split and each chunk imports the JSX
+  // runtime as a plain binding, so the call is a bare `ee("ink-box",{...})`
+  // with no namespace object in front of it -- accepted as a third form. The
+  // long flexWrap/overflow prelude and the `style:<rest>` prop keep the match
+  // specific despite the looser callee.
+  //
+  // The name this returns is chunk-local. A caller that injects at a site in
+  // another chunk needs Box under THAT chunk's name, not this one.
   const restStyleBoxPattern =
-    /function ([$\w]+)\(\{children:([$\w]+),ref:[$\w]+.{0,600}?\.\.\.([$\w]+)\}\)\{.{0,2500}?"margin".{0,2500}?"padding".{0,1200}?"gap".{0,1200}?\3\.flexWrap\?\?="nowrap",\3\.flexDirection\?\?="row",\3\.flexGrow\?\?=0,\3\.flexShrink\?\?=1,\3\.overflowX=\3\.overflowX\?\?\3\.overflow\?\?"visible",\3\.overflowY=\3\.overflowY\?\?\3\.overflow\?\?"visible",[$\w]+(?:\.default)?\.(?:createElement|jsxs?)\("ink-box",\{[^}]*style:\3[^}]*\}/;
+    /function ([$\w]+)\(\{children:([$\w]+),ref:[$\w]+.{0,600}?\.\.\.([$\w]+)\}\)\{.{0,2500}?"margin".{0,2500}?"padding".{0,1200}?"gap".{0,1200}?\3\.flexWrap\?\?="nowrap",\3\.flexDirection\?\?="row",\3\.flexGrow\?\?=0,\3\.flexShrink\?\?=1,\3\.overflowX=\3\.overflowX\?\?\3\.overflow\?\?"visible",\3\.overflowY=\3\.overflowY\?\?\3\.overflow\?\?"visible",(?:[$\w]+(?:\.default)?\.(?:createElement|jsxs?)|[$\w]+)\("ink-box",\{[^}]*style:\3[^}]*\}/;
   const restStyleBoxMatch = fileContents.match(restStyleBoxPattern);
   if (restStyleBoxMatch) {
     return (

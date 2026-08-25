@@ -96,6 +96,20 @@ describe('findBoxComponent', () => {
     expect(findBoxComponent(src)).toBe('Bx');
   });
 
+  it('finds the Box component when the JSX runtime is a bare binding (CC >=2.1.242)', () => {
+    // The code-split bundle imports the runtime into each chunk as a plain
+    // name, so the call has no namespace object in front of it: `ee("ink-box",
+    // {...})` rather than `Q.jsx("ink-box",{...})`. Everything before the
+    // callee is unchanged, which is what keeps the looser callee specific.
+    const src =
+      'function _n({children:e,ref:t,...u}){' +
+      '"margin","padding","gap",' +
+      'u.flexWrap??="nowrap",u.flexDirection??="row",u.flexGrow??=0,u.flexShrink??=1,' +
+      'u.overflowX=u.overflowX??u.overflow??"visible",u.overflowY=u.overflowY??u.overflow??"visible",' +
+      'ee("ink-box",{ref:t,style:u,children:e})}';
+    expect(findBoxComponent(src)).toBe('_n');
+  });
+
   it('still finds the Box component via legacy createElement("ink-box")', () => {
     const src =
       'function Bx2({children:T,flexWrap:W}){return q.createElement("ink-box",{style:s},T)}';
