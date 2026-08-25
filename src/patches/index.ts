@@ -105,6 +105,7 @@ export {
   clearRequireFuncNameCache,
   findTextComponent,
   findBoxComponent,
+  moduleSliceAround,
 } from './helpers';
 
 export interface LocationResult {

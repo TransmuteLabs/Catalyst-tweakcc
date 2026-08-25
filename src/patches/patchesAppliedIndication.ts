@@ -5,6 +5,7 @@ import {
   findChalkVar,
   findTextComponent,
   getReactVar,
+  moduleSliceAround,
   showDiff,
 } from './index';
 
@@ -28,6 +29,96 @@ export const findVersionOutputLocation = (
     startIndex: 0,
     endIndex: versionIndex + versionPattern.length,
   };
+};
+
+interface JsxHeader {
+  /** Element factory to call, e.g. `X.jsx` or a bare `l`. */
+  factory: string;
+  /** Ink Text component, taken from the header itself. */
+  textComponent: string;
+  /** Ink Box component of the column the header sits in. */
+  boxComponent: string;
+  /** Offset just past the version element -- where a sibling child goes. */
+  versionElEnd: number;
+  /** Offset of the `]` closing the column's children -- where the list goes. */
+  columnEnd: number;
+}
+
+/**
+ * Locates the startup header when it is compiled to the JSX automatic runtime:
+ *
+ *   HDR = jsxs(TEXT,{children:[BOLD," ",jsxs(TEXT,{dimColor:!0,children:["v",VER]})]})
+ *   ...  jsxs(BOX,{flexDirection:"column",children:[HDR,...]})
+ *
+ * Everything the caller may emit -- the factory, the Text, the Box -- is read
+ * out of this one chain, and the whole chain is required to sit inside a single
+ * bundle module. That is not belt-and-braces: on 2.1.246 the version element's
+ * shape occurs three times, twice in the fleet view, and the Text component `a`
+ * there is a different import than the `c` of the real header. Anchoring on
+ * shape alone would render the tweakcc line into the wrong screen, or emit a
+ * name that does not exist where it lands. Requiring the assignment and the
+ * column box to resolve in the same module leaves exactly one candidate.
+ *
+ * The factory is captured rather than assumed: from 2.1.242 a chunk imports the
+ * runtime under a plain name, so the call reads `l(c,{...})` and not
+ * `X.jsxs(c,{...})`. `jsx` and `jsxs` differ only in a static-children hint, so
+ * whichever one the header used is fine for every element emitted beside it.
+ */
+const findJsxHeader = (fileContents: string): JsxHeader | null => {
+  const versionEl =
+    /(?:([$\w]+)\.jsxs?|([$\w]+))\(([$\w]+),\{dimColor:!0,children:\["v",[$\w]+\]\}\)/g;
+
+  const found: JsxHeader[] = [];
+
+  for (const m of fileContents.matchAll(versionEl)) {
+    if (m.index === undefined) continue;
+    const factory = m[1] ? `${m[1]}.jsx` : m[2];
+    const textComponent = m[3];
+    const callee = m[1] ? `${escapeIdent(m[1])}\\.jsxs?` : escapeIdent(m[2]);
+
+    const [modStart, modEnd] = moduleSliceAround(fileContents, m.index);
+    const mod = fileContents.slice(modStart, modEnd);
+    const versionAt = m.index - modStart;
+
+    // Header row: the nearest `VAR=<factory>(TEXT,{children:[` before it.
+    const hdrRe = new RegExp(
+      `([$\\w]+)=${callee}\\(${escapeIdent(textComponent)},\\{children:\\[`,
+      'g'
+    );
+    let headerVar: string | undefined;
+    for (const h of mod.matchAll(hdrRe)) {
+      if (h.index === undefined || h.index >= versionAt) break;
+      headerVar = h[1];
+    }
+    if (!headerVar) continue;
+
+    // Column box whose first child is that row. Kept to a window after the
+    // header so a far-away column starting with a same-named var cannot win.
+    const colRe = new RegExp(
+      `${callee}\\(([$\\w]+),\\{flexDirection:"column",children:\\[${escapeIdent(headerVar)}(?:,[^\\]]*)?\\]`
+    );
+    const windowStr = mod.slice(versionAt, versionAt + 6000);
+    const col = windowStr.match(colRe);
+    if (!col || col.index === undefined) continue;
+
+    found.push({
+      factory,
+      textComponent,
+      boxComponent: col[1],
+      versionElEnd: m.index + m[0].length,
+      columnEnd: modStart + versionAt + col.index + col[0].length - 1,
+    });
+  }
+
+  if (found.length === 0) return null;
+  if (found.length > 1) {
+    console.error(
+      `patch: patchesAppliedIndication: ${found.length} headers resolve a full ` +
+        'row-and-column chain, refusing to guess which screen is the startup header'
+    );
+    return null;
+  }
+  return found[0];
 };
 
 /**
@@ -523,30 +614,16 @@ export const writePatchesAppliedIndication = (
     versionOutputLocation.endIndex
   );
 
-  // Find shared components needed by multiple patches
+  // Shared lookups for the patches below. None of them is required by PATCH 1,
+  // which is already done, and only the classic createElement paths need all
+  // three: the JSX-runtime paths take their component and their element factory
+  // from the header they matched. Failing here used to discard PATCH 1's work
+  // along with everything else -- on a bundle with no React namespace to find,
+  // `claude --version` lost its tweakcc line for a reason that had nothing to do
+  // with it. Each value is now checked by the branch that actually reads it.
   const chalkVar = findChalkVar(fileContents);
-  if (!chalkVar) {
-    console.error(
-      'patch: patchesAppliedIndication: failed to find chalk variable'
-    );
-    return null;
-  }
-
   const textComponent = findTextComponent(fileContents);
-  if (!textComponent) {
-    console.error(
-      'patch: patchesAppliedIndication: failed to find text component'
-    );
-    return null;
-  }
-
   const reactVar = getReactVar(fileContents);
-  if (!reactVar) {
-    console.error(
-      'patch: patchesAppliedIndication: failed to find React variable'
-    );
-    return null;
-  }
 
   // PATCH 2: Add tweakcc version to all header paths.
   // Path A: SyK banner borderText (chalk template literal)
@@ -570,28 +647,59 @@ export const writePatchesAppliedIndication = (
       /([$\w]+\("claude",[$\w]+\)\(" Claude Code) ("\))/,
       `$1 + tweakcc v${tweakccVersion} $2`
     );
-    const locs = findTweakccVersionLocations(content);
-    if (!locs) {
-      console.error(
-        'patch: patchesAppliedIndication: patch 2 skipped (header version pattern changed)'
-      );
-    } else if (locs.jsx) {
-      // JSX runtime: insert the tweakcc version as a sibling child in the header
-      // children array, right after the version element (jsx takes children as a
-      // prop, so we can't reuse the classic createElement(type,props,...children)).
-      const tweakccEl = `${locs.jsxVar}.jsx(${locs.textComponent},{children:${chalkVar}.hex("#FF8400").bold("+ tweakcc v${tweakccVersion}")})`;
+    const jsxHeader = findJsxHeader(content);
+    const locs = jsxHeader ? null : findTweakccVersionLocations(content);
+    if (jsxHeader) {
+      // Insert the tweakcc version as a sibling child right after the version
+      // element. The colour comes from a Text prop rather than from chalk: chalk
+      // is resolved file-wide, and on a code-split bundle the name it returns
+      // usually belongs to a different module than the one this element lands
+      // in, where it is either another value or nothing at all.
+      const tweakccEl = `${jsxHeader.factory}(${jsxHeader.textComponent},{color:"#FF8400",bold:true,children:"+ tweakcc v${tweakccVersion}"})`;
       const refCode = `," ",${tweakccEl}`;
       const oldContent2 = content;
       content =
-        content.slice(0, locs.insertIndex) +
+        content.slice(0, jsxHeader.versionElEnd) +
         refCode +
-        content.slice(locs.insertIndex);
+        content.slice(jsxHeader.versionElEnd);
       showDiff(
         oldContent2,
         content,
         refCode,
-        locs.insertIndex,
-        locs.insertIndex
+        jsxHeader.versionElEnd,
+        jsxHeader.versionElEnd
+      );
+    } else if (!locs) {
+      console.error(
+        'patch: patchesAppliedIndication: patch 2 skipped (header version pattern changed)'
+      );
+    } else if (locs.jsx) {
+      // Reached only when findJsxHeader declined -- the header is JSX but its
+      // row or column could not be resolved -- so this keeps the older, shape-only
+      // insertion as a fallback.
+      if (!chalkVar) {
+        console.error(
+          'patch: patchesAppliedIndication: patch 2 skipped (no chalk variable for the JSX fallback)'
+        );
+      } else {
+        const tweakccEl = `${locs.jsxVar}.jsx(${locs.textComponent},{children:${chalkVar}.hex("#FF8400").bold("+ tweakcc v${tweakccVersion}")})`;
+        const refCode = `," ",${tweakccEl}`;
+        const oldContent2 = content;
+        content =
+          content.slice(0, locs.insertIndex) +
+          refCode +
+          content.slice(locs.insertIndex);
+        showDiff(
+          oldContent2,
+          content,
+          refCode,
+          locs.insertIndex,
+          locs.insertIndex
+        );
+      }
+    } else if (!chalkVar) {
+      console.error(
+        'patch: patchesAppliedIndication: patch 2 skipped (no chalk variable)'
       );
     } else {
       // Step 1: Insert variable declaration after the "Claude Code" bold element
@@ -635,10 +743,51 @@ export const writePatchesAppliedIndication = (
 
   // PATCH 3: Add patches applied list (if enabled)
   if (showPatchesApplied) {
+    // Re-resolved rather than carried over from PATCH 2: that patch inserts text
+    // ahead of this insertion point, so every offset taken before it is stale.
+    const listHeader = findJsxHeader(content);
+    if (listHeader) {
+      // Append the list as the last child of the column the header sits in.
+      // Factory, Text and Box all come from that same chain, so every name here
+      // is in scope where the code lands. `jsxs` and `jsx` differ only in a
+      // static-children hint, so one factory serves rows and leaves alike.
+      const { factory, textComponent: text, boxComponent: box } = listHeader;
+      const rows: string[] = [];
+      rows.push(
+        `${factory}(${box},{children:[${factory}(${text},{color:"success",bold:true,children:"┃ "}),${factory}(${text},{color:"success",bold:true,children:"✓ tweakcc patches are applied"})]})`
+      );
+      for (const item of patchesApplies) {
+        rows.push(
+          `${factory}(${box},{children:[${factory}(${text},{color:"success",bold:true,children:"┃ "}),${factory}(${text},{dimColor:true,children:\`  * ${item}\`})]})`
+        );
+      }
+      const listEl = `${factory}(${box},{flexDirection:"column",children:[${rows.join(',')}]})`;
+      const patchesListCode = `,${listEl}`;
+      const oldContent3 = content;
+      content =
+        content.slice(0, listHeader.columnEnd) +
+        patchesListCode +
+        content.slice(listHeader.columnEnd);
+      showDiff(
+        oldContent3,
+        content,
+        patchesListCode,
+        listHeader.columnEnd,
+        listHeader.columnEnd
+      );
+      return content;
+    }
+
     const boxComponent = findBoxComponent(content);
     if (!boxComponent) {
       console.error(
         'patch: patchesAppliedIndication: PATCH 3 skipped (Box component not located on this CC version)'
+      );
+      return content;
+    }
+    if (!textComponent) {
+      console.error(
+        'patch: patchesAppliedIndication: PATCH 3 skipped (Text component not located on this CC version)'
       );
       return content;
     }
@@ -661,7 +810,7 @@ export const writePatchesAppliedIndication = (
         `${jsxVar}.jsxs(${listBox},{children:[${jsxVar}.jsx(${textComponent},{color:"success",bold:true,children:"┃ "}),${jsxVar}.jsx(${textComponent},{color:"success",bold:true,children:"✓ tweakcc patches are applied"})]})`
       );
       for (let item of patchesApplies) {
-        item = item.replace('CHALK_VAR', chalkVar);
+        if (chalkVar) item = item.replace('CHALK_VAR', chalkVar);
         rows.push(
           `${jsxVar}.jsxs(${listBox},{children:[${jsxVar}.jsx(${textComponent},{color:"success",bold:true,children:"┃ "}),${jsxVar}.jsx(${textComponent},{dimColor:true,children:\`  * ${item}\`})]})`
         );
@@ -680,6 +829,10 @@ export const writePatchesAppliedIndication = (
         patchesListLoc.startIndex,
         patchesListLoc.endIndex
       );
+    } else if (!reactVar) {
+      console.error(
+        'patch: patchesAppliedIndication: PATCH 3 skipped (no React namespace for the createElement list)'
+      );
     } else {
       const lines = [];
       lines.push(
@@ -689,7 +842,7 @@ export const writePatchesAppliedIndication = (
         `${reactVar}.createElement(${boxComponent}, null, ${reactVar}.createElement(${textComponent}, {color: "success", bold: true}, "┃ "), ${reactVar}.createElement(${textComponent}, {color: "success", bold: true}, "✓ tweakcc patches are applied")),`
       );
       for (let item of patchesApplies) {
-        item = item.replace('CHALK_VAR', chalkVar);
+        if (chalkVar) item = item.replace('CHALK_VAR', chalkVar);
         lines.push(
           `${reactVar}.createElement(${boxComponent}, null, ${reactVar}.createElement(${textComponent}, {color: "success", bold: true}, "┃ "), ${reactVar}.createElement(${textComponent}, {dimColor: true}, \`  * ${item}\`)),`
         );

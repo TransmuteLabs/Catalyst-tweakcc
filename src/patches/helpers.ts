@@ -1,4 +1,33 @@
 import { escapeIdent } from '.';
+import { MODULE_BOUNDARY_SPLIT_RE } from '../nativeInstallation';
+
+/**
+ * The half-open range of the bundle module that `position` falls in.
+ *
+ * From 2.1.242 the product ships as ~1400 ES modules concatenated with a marker
+ * between them, and a minified name means whatever that one module says it
+ * means: the `o` that is a JSX factory in one module is a path helper in the
+ * next. A patch that reads a name at one offset and emits it at another is only
+ * correct if both offsets are in this range. On a single-module bundle there are
+ * no markers and the range is the whole file, so callers need no special case.
+ */
+export const moduleSliceAround = (
+  fileContents: string,
+  position: number
+): [number, number] => {
+  const finder = new RegExp(MODULE_BOUNDARY_SPLIT_RE.source, 'g');
+  let start = 0;
+  let end = fileContents.length;
+  let m: RegExpExecArray | null;
+  while ((m = finder.exec(fileContents)) !== null) {
+    if (m.index + m[0].length <= position) start = m.index + m[0].length;
+    else {
+      end = m.index;
+      break;
+    }
+  }
+  return [start, end];
+};
 
 /**
  * Escapes every non-ASCII code unit as a `\uXXXX` sequence so injected source
