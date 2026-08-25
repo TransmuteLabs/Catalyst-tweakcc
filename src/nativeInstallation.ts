@@ -1174,105 +1174,174 @@ function rebuildBunData(
   // for all ~1400.
   const head = Buffer.from(bunData.subarray(0, offsetsOffset));
   const tableOffset = bunOffsets.modulesPtr.offset;
-  const appended: Buffer[] = [];
-  const vacated: Array<[number, number]> = [];
-  const replacedIndices = new Set<number>();
-  let appendedLength = 0;
-  let replaced = 0;
 
-  mapModules(bunData, bunOffsets, moduleStructSize, (module, _name, index) => {
+  // Which modules actually change. A module whose contents come back identical
+  // is not a change, however it was produced.
+  const changed = new Map<number, Buffer>();
+  mapModules(bunData, bunOffsets, moduleStructSize, (module, _n, index) => {
     const replacement = modifiedModules?.get(index);
     if (replacement === undefined) return undefined;
-    if (replacement.equals(getStringPointerContent(bunData, module.contents))) {
-      return undefined;
+    if (
+      !replacement.equals(getStringPointerContent(bunData, module.contents))
+    ) {
+      changed.set(index, replacement);
     }
-
-    // Only `contents` moves. Bytecode, sourcemap and moduleInfo keep both their
-    // bytes and their pointers, including for a module whose source was edited.
-    // That is deliberate: patched 2.1.239 images keep the full 215 MB bytecode
-    // blob next to edited source and the edits do take effect, so a stale blob
-    // is discarded at load. If a future image ever runs stale bytecode instead,
-    // the symptom is the smoke gate not seeing patched behaviour, and the fix
-    // is to zero this module's `bytecode` StringPointer here.
-    const newOffset = head.length + appendedLength;
-    if (newOffset + replacement.length > 0xffffffff) {
-      // A StringPointer addresses the payload with a u32, so appending cannot
-      // walk past 4 GiB. Refusing beats writing a truncated offset that would
-      // point the loader at the wrong bytes.
-      throw new Error(
-        'rebuildBunData: appended contents push the payload past the 4 GiB a StringPointer can address'
-      );
-    }
-    appended.push(replacement, NULL_TERMINATOR);
-    appendedLength += replacement.length + 1;
-
-    if (module.contents.length > 0) {
-      vacated.push([
-        module.contents.offset,
-        module.contents.offset + module.contents.length,
-      ]);
-    }
-    replacedIndices.add(index);
-
-    // `contents` is the second StringPointer in the struct, so eight bytes in.
-    const field = tableOffset + index * moduleStructSize + 8;
-    head.writeUInt32LE(newOffset, field);
-    head.writeUInt32LE(replacement.length, field + 4);
-    replaced += 1;
     return undefined;
   });
+  if (changed.size === 0) {
+    // Nothing to place, so nothing may move: a repack that changes nothing is
+    // byte-for-byte the payload it was handed.
+    return Buffer.from(bunData);
+  }
 
-  // The bytes a replaced module used to occupy are now unreferenced. Blanking
-  // them is not housekeeping. Left in place they keep a pre-patch copy of the
-  // code inside the shipped image, so anything that reasons about the image by
-  // scanning its bytes still finds the construct a patch had just removed --
-  // the pipeline's own verification does exactly that, and reported eight
-  // false failures on 2.1.246 before this existed.
+  // What may move, and what may not.
   //
-  // A span is blanked only where nothing else claims it: two identical modules
-  // may share one string, and a shared span belongs to whoever still points at
-  // it.
-  if (vacated.length > 0) {
-    const live: Array<[number, number]> = [];
-    const keep = (ptr: StringPointer) => {
-      // +1 for the null terminator, which belongs to the string it follows.
-      if (ptr.length > 0) live.push([ptr.offset, ptr.offset + ptr.length + 1]);
-    };
-    keep(bunOffsets.modulesPtr);
-    keep(bunOffsets.compileExecArgvPtr);
-    mapModules(bunData, bunOffsets, moduleStructSize, (module, _n, index) => {
-      keep(module.name);
-      keep(module.sourcemap);
-      keep(module.bytecode);
-      keep(module.moduleInfo);
-      keep(module.bytecodeOriginPath);
-      // A module that was not replaced still owns its contents where they are.
-      if (!replacedIndices.has(index)) keep(module.contents);
-      return undefined;
-    });
-    live.sort((a, b) => a[0] - b[0]);
+  // Every string a module owns is reachable only through the table entry
+  // rewritten below, so all of them may be re-placed. Two things may not: the
+  // module table and compileExecArgv, pinned here for simplicity, and -- the
+  // reason this function was rewritten -- every region no pointer accounts for
+  // at all. 2.1.246 carries 9,878,219 such bytes; the previous implementation
+  // laid the payload out afresh from the table, so those bytes ceased to exist
+  // and the kernel killed the result on exec. Whatever references them does so
+  // by an offset this code cannot find and therefore cannot rewrite, so they
+  // keep both their bytes and their absolute offset by never being touched.
+  //
+  // Re-placing every string, rather than only the changed ones, is what keeps
+  // the image from growing. Each module's strings are laid out consecutively --
+  // name, contents, sourcemap, bytecode -- so the hole a changed module leaves
+  // is bounded by its neighbours' bytecode unless those may move too. Placing
+  // only changed contents left the largest patched module unable to fit the
+  // hole it had just vacated (a patch made it bigger), so it was appended and
+  // the image grew by its entire size: 7.3 MB on 2.1.245, 28.3 MB on unsplit
+  // 2.1.239 where the one module is the whole program.
+  //
+  // Moving bytecode is not new behaviour: the previous implementation moved
+  // every blob on every rebuild, and those images ran. What is new is that the
+  // unaccounted-for regions no longer move with them.
+  const NAME = 0;
+  const CONTENTS = 8;
+  const SOURCEMAP = 16;
+  const BYTECODE = 24;
+  const MODULE_INFO = 32;
+  const BYTECODE_ORIGIN_PATH = 40;
 
-    let blanked = 0;
-    for (const [vStart, vEnd] of vacated) {
-      let cursor = vStart;
-      for (const [lStart, lEnd] of live) {
-        if (lEnd <= cursor) continue;
-        if (lStart >= vEnd) break;
-        if (lStart > cursor) {
-          const stop = Math.min(lStart, vEnd);
-          head.fill(0, cursor, stop);
-          blanked += stop - cursor;
-        }
-        cursor = Math.max(cursor, lEnd);
-        if (cursor >= vEnd) break;
-      }
-      if (cursor < vEnd) {
-        head.fill(0, cursor, vEnd);
-        blanked += vEnd - cursor;
+  const slots: Array<{ index: number; field: number; data: Buffer }> = [];
+  const arena: Array<[number, number]> = [];
+  const pinned: Array<[number, number]> = [];
+  const spanOf = (ptr: StringPointer): [number, number] => [
+    ptr.offset,
+    // +1 for the null terminator, which belongs to the string before it.
+    Math.min(ptr.offset + ptr.length + 1, head.length),
+  ];
+  if (bunOffsets.modulesPtr.length > 0)
+    pinned.push(spanOf(bunOffsets.modulesPtr));
+  if (bunOffsets.compileExecArgvPtr.length > 0) {
+    pinned.push(spanOf(bunOffsets.compileExecArgvPtr));
+  }
+
+  mapModules(bunData, bunOffsets, moduleStructSize, (module, _n, index) => {
+    const take = (field: number, ptr: StringPointer, data?: Buffer) => {
+      slots.push({
+        index,
+        field,
+        data: data ?? getStringPointerContent(bunData, ptr),
+      });
+      // A zero-length pointer owns no bytes, so it lends none to the arena. It
+      // still gets a slot: the layout Bun ships gives every string a null
+      // terminator, including the empty ones.
+      if (ptr.length > 0) arena.push(spanOf(ptr));
+    };
+    take(NAME, module.name);
+    take(CONTENTS, module.contents, changed.get(index));
+    take(SOURCEMAP, module.sourcemap);
+    take(BYTECODE, module.bytecode);
+    if (moduleStructSize === SIZEOF_MODULE_NEW) {
+      take(MODULE_INFO, module.moduleInfo);
+      take(BYTECODE_ORIGIN_PATH, module.bytecodeOriginPath);
+    }
+    return undefined;
+  });
+  pinned.sort((a, b) => a[0] - b[0]);
+
+  // The free list: the arena with everything pinned subtracted out, then
+  // merged, so consecutive strings become one hole large enough to matter.
+  arena.sort((a, b) => a[0] - b[0]);
+  const carved: Array<[number, number]> = [];
+  for (const [aStart, aEnd] of arena) {
+    let cursor = aStart;
+    for (const [pStart, pEnd] of pinned) {
+      if (pEnd <= cursor) continue;
+      if (pStart >= aEnd) break;
+      if (pStart > cursor) carved.push([cursor, Math.min(pStart, aEnd)]);
+      cursor = Math.max(cursor, pEnd);
+      if (cursor >= aEnd) break;
+    }
+    if (cursor < aEnd) carved.push([cursor, aEnd]);
+  }
+  const free: Array<[number, number]> = [];
+  for (const c of carved) {
+    const last = free[free.length - 1];
+    if (last && c[0] <= last[1]) last[1] = Math.max(last[1], c[1]);
+    else free.push([c[0], c[1]]);
+  }
+
+  // Largest first, into the tightest hole that fits: a big hole is the only
+  // thing that can take a big string, so spending it on a small one early is
+  // how packing fails.
+  const appended: Buffer[] = [];
+  let appendedLength = 0;
+  let reused = 0;
+  for (const slot of [...slots].sort((a, b) => b.data.length - a.data.length)) {
+    const need = slot.data.length + 1; // the string and its null terminator
+    let best = -1;
+    for (let i = 0; i < free.length; i++) {
+      if (free[i][1] - free[i][0] < need) continue;
+      if (best < 0 || free[i][1] - free[i][0] < free[best][1] - free[best][0]) {
+        best = i;
       }
     }
-    debug(`rebuildBunData: ${blanked} vacated byte(s) blanked`);
+
+    let offset: number;
+    if (best >= 0) {
+      offset = free[best][0];
+      slot.data.copy(head, offset);
+      head[offset + slot.data.length] = 0;
+      free[best][0] += need;
+      if (free[best][0] >= free[best][1]) free.splice(best, 1);
+      reused += need;
+    } else {
+      offset = head.length + appendedLength;
+      if (offset + slot.data.length > 0xffffffff) {
+        // A StringPointer addresses the payload with a u32, so appending cannot
+        // walk past 4 GiB. Refusing beats writing a truncated offset that would
+        // point the loader at the wrong bytes.
+        throw new Error(
+          'rebuildBunData: appended contents push the payload past the 4 GiB a StringPointer can address'
+        );
+      }
+      appended.push(slot.data, NULL_TERMINATOR);
+      appendedLength += need;
+    }
+
+    const field = tableOffset + slot.index * moduleStructSize + slot.field;
+    head.writeUInt32LE(offset, field);
+    head.writeUInt32LE(slot.data.length, field + 4);
   }
+
+  // Whatever nobody claimed is blanked. Left in place it would keep a pre-patch
+  // copy of the code inside the shipped image, so anything reasoning about the
+  // image by scanning its bytes still finds the construct a patch had just
+  // removed -- the patch pipeline's own verification does exactly that, and
+  // reported eight false failures on 2.1.246 before this existed.
+  let blanked = 0;
+  for (const [start, end] of free) {
+    head.fill(0, start, end);
+    blanked += end - start;
+  }
+
+  debug(
+    `rebuildBunData: ${changed.size} changed, ${slots.length} string(s) re-placed, ${reused} byte(s) reused, ${appendedLength} appended, ${blanked} blanked`
+  );
 
   const byteCount = head.length + appendedLength;
   const offsets = Buffer.alloc(SIZEOF_OFFSETS);
@@ -1285,7 +1354,7 @@ function rebuildBunData(
   offsets.writeUInt32LE(bunOffsets.flags, 28);
 
   debug(
-    `rebuildBunData: ${replaced} module(s) replaced, payload ${bunData.length} -> ${byteCount + SIZEOF_OFFSETS + BUN_TRAILER.length} bytes`
+    `rebuildBunData: payload ${bunData.length} -> ${byteCount + SIZEOF_OFFSETS + BUN_TRAILER.length} bytes`
   );
 
   return Buffer.concat([head, ...appended, offsets, BUN_TRAILER]);
