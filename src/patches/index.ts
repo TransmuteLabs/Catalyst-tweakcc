@@ -16,6 +16,7 @@ import {
 import { DEFAULT_SETTINGS } from '../defaultSettings';
 import {
   assertPatchedBundleParses,
+  findParseFailure,
   PatchedBundleParseError,
 } from './parseGate';
 
@@ -565,11 +566,28 @@ const applyPatchImplementations = (
 
     debug(`Applying patch: ${def.name}`);
     const result = impl.fn(content);
-    const failed = result === null;
-    const applied = !failed && result !== content;
+    let failed = result === null;
+    let applied = !failed && result !== content;
+
+    // A patch that emits code the engine cannot parse used to be caught only by
+    // the gate at the end, where the sole remedy is to discard the whole apply
+    // -- every other patch lost to one bad edit, and nothing naming which one.
+    // Checking what this patch changed, right after it changed it, turns that
+    // into a single failed patch with its name on it. Only the modules it
+    // touched are parsed, so the cost is a subprocess or two per applied patch.
+    if (applied) {
+      const failure = findParseFailure(result as string, content);
+      if (failure !== null) {
+        console.error(
+          `patch: ${def.id}: skipped -- it produced code that does not parse:\n${failure}`
+        );
+        failed = true;
+        applied = false;
+      }
+    }
 
     if (!failed) {
-      content = result;
+      content = result as string;
     }
 
     results.push({

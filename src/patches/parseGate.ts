@@ -96,11 +96,11 @@ export const isParseFailureExit = (err: unknown): boolean =>
  * temp file warns and skips the check, so an operational problem never blocks an
  * otherwise-valid apply.
  */
-const checkOneUnit = (
+const runCheck = (
   content: string,
   extension: string,
   label: string
-): void => {
+): string | null => {
   let dir: string;
   try {
     dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'tweakcc-parse-'));
@@ -110,7 +110,7 @@ const checkOneUnit = (
         `Warning: could not create a temp file to verify the patched bundle (${String(err)}); skipping the parse check.`
       )
     );
-    return;
+    return null;
   }
 
   const tmpFile = path.join(dir, `bundle.${extension}`);
@@ -124,7 +124,7 @@ const checkOneUnit = (
           `Warning: could not write the patched bundle for verification (${String(err)}); skipping the parse check.`
         )
       );
-      return;
+      return null;
     }
 
     let errFd: number;
@@ -136,7 +136,7 @@ const checkOneUnit = (
           `Warning: could not open a temp file to verify the patched bundle (${String(err)}); skipping the parse check.`
         )
       );
-      return;
+      return null;
     }
     let parseFailed = false;
     let operationalFailure: string | null = null;
@@ -161,7 +161,7 @@ const checkOneUnit = (
           `Warning: the parse check could not run to completion (${operationalFailure}); skipping it.`
         )
       );
-      return;
+      return null;
     }
 
     if (parseFailed) {
@@ -172,10 +172,9 @@ const checkOneUnit = (
         // The sanitizer synthesizes a message when stderr is unavailable.
       }
       const detail = sanitizeParseError(stderr, tmpFile);
-      throw new PatchedBundleParseError(
-        label ? `${label}\n\n${detail}` : detail
-      );
+      return label ? `${label}\n\n${detail}` : detail;
     }
+    return null;
   } finally {
     try {
       fsSync.rmSync(dir, { recursive: true, force: true });
@@ -211,14 +210,27 @@ export const assertPatchedBundleParses = (
   content: string,
   originalContent?: string
 ): void => {
+  const failure = findParseFailure(content, originalContent);
+  if (failure !== null) throw new PatchedBundleParseError(failure);
+};
+
+/**
+ * The same check, reporting instead of throwing. `applyPatchImplementations`
+ * uses it after each patch so that a patch which emits broken code is rolled
+ * back and reported by name, rather than reaching the final gate where the only
+ * available remedy is to discard every other patch with it.
+ */
+export const findParseFailure = (
+  content: string,
+  originalContent?: string
+): string | null => {
   const splitter = new RegExp(MODULE_BOUNDARY_SPLIT_RE.source, 'g');
   // With a capturing group, `split` interleaves the module ordinals:
   // [text, ord, text, ord, text, ...].
   const parts = content.split(splitter);
 
   if (parts.length === 1) {
-    checkOneUnit(content, 'cjs', '');
-    return;
+    return runCheck(content, 'cjs', '');
   }
 
   const originalParts =
@@ -234,10 +246,12 @@ export const assertPatchedBundleParses = (
   const moduleCount = (parts.length + 1) / 2;
   for (let i = 0; i < parts.length; i += 2) {
     if (comparable && originalParts![i] === parts[i]) continue;
-    checkOneUnit(
+    const failure = runCheck(
       parts[i],
       'mjs',
       `In bundle module ${i / 2} of ${moduleCount}:`
     );
+    if (failure !== null) return failure;
   }
+  return null;
 };
