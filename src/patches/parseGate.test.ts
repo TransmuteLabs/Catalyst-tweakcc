@@ -48,6 +48,25 @@ describe('assertPatchedBundleParses', () => {
     expect(String((caught as Error).message)).toContain('bundle module 1 of 2');
   });
 
+  // Node 22 rejects `using` declarations that Bun accepts, so 2.1.246's largest
+  // module does not parse on the host before any patch runs. An absolute
+  // verdict blamed the patches for it.
+  const USING = 'function f(){using n=g();return n;}';
+
+  it('does not blame a patch for syntax the host engine never accepted', () => {
+    const original = 'const x=1;export{x as a};' + B(1) + USING;
+    const patched = 'const x=1;export{x as a};' + B(1) + USING + 'export{f};';
+    expect(() => assertPatchedBundleParses(patched, original)).not.toThrow();
+  });
+
+  it('still reports a module the patch really broke, beside an unjudgeable one', () => {
+    const original = 'const x=1;export{x as a};' + B(1) + USING;
+    const patched = 'const x=1;export{x as};' + B(1) + USING + 'export{f};';
+    expect(() => assertPatchedBundleParses(patched, original)).toThrow(
+      PatchedBundleParseError
+    );
+  });
+
   it('skips modules the patches did not change', () => {
     // Module 1 is broken but identical to the original, so it is not this
     // apply's doing and is not checked; module 0 changed and is fine.

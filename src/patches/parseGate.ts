@@ -185,27 +185,49 @@ const runCheck = (
 };
 
 /**
- * Verifies that the fully-patched bundle still parses.
+ * Verifies that patching did not break the bundle's syntax.
  *
  * Which unit is parsed depends on the shape of the bundle, and getting that
  * wrong is not a false alarm -- it discards every customization.
  *
  * Up to 2.1.241 the product is one CommonJS module (`@bun-cjs`), and the whole
- * text is checked as `.cjs`.
+ * text is checked as `.cjs`. From 2.1.242 it is ~1400 ES modules that the
+ * extractor joins with a marker between them. That text is not a program in any
+ * goal: as CommonJS the first `export{...}` is a syntax error, and as one module
+ * the modules' top-level declarations collide. A split bundle is therefore
+ * checked one module at a time, as `.mjs`.
  *
- * From 2.1.242 it is ~1400 ES modules, which the extractor joins with a marker
- * between them. That text is not a program in any goal: as CommonJS the first
- * `export{...}` is a syntax error, and as one module the modules' top-level
- * declarations collide. Checking it as a unit therefore fails on every such
- * bundle no matter what the patches did -- observed on 2.1.246, where a clean
- * apply was rejected with `Unexpected token 'export'` and the binary was left
- * unpatched. The split bundle is instead checked one module at a time, as
- * `.mjs`.
+ * The check is DIFFERENTIAL, and that is not caution -- `node --check` runs on
+ * whatever Node is hosting tweakcc, which is not the engine the product was
+ * built for. 2.1.246's largest module contains `using` declarations, which Bun
+ * accepts and V8 in Node 22 does not, so that module fails to parse before any
+ * patch touches it. Reporting the absolute verdict blamed four patches in turn
+ * for the product's own syntax. A module is only reported when the original
+ * parsed and the patched one does not; when the original does not parse there is
+ * no oracle, and the module is skipped with a note rather than judged.
  *
  * Only modules the patches actually changed are checked, which is both what the
  * gate is for and what keeps it to a handful of subprocesses instead of ~1400.
- * Without the original text to compare against, every module is checked.
+ * Without the original text to compare against, every module is checked and the
+ * verdict is absolute -- there is nothing to compare with.
  */
+/**
+ * Said once per module per process: the per-patch check calls the gate after
+ * every patch, and the largest module is touched by many of them.
+ */
+const unjudgeable = new Set<number>();
+const warnUnjudgeableModule = (position: number): void => {
+  if (unjudgeable.has(position)) return;
+  unjudgeable.add(position);
+  console.warn(
+    chalk.yellow(
+      `Warning: bundle module ${position} does not parse with this Node either ` +
+        'before patching, so patches to it cannot be syntax-checked here. The ' +
+        'product is built for a newer engine than the one running tweakcc.'
+    )
+  );
+};
+
 export const assertPatchedBundleParses = (
   content: string,
   originalContent?: string
@@ -230,7 +252,16 @@ export const findParseFailure = (
   const parts = content.split(splitter);
 
   if (parts.length === 1) {
-    return runCheck(content, 'cjs', '');
+    const failure = runCheck(content, 'cjs', '');
+    if (failure === null) return null;
+    if (
+      originalContent !== undefined &&
+      runCheck(originalContent, 'cjs', '') !== null
+    ) {
+      warnUnjudgeableModule(0);
+      return null;
+    }
+    return failure;
   }
 
   const originalParts =
@@ -246,12 +277,14 @@ export const findParseFailure = (
   const moduleCount = (parts.length + 1) / 2;
   for (let i = 0; i < parts.length; i += 2) {
     if (comparable && originalParts![i] === parts[i]) continue;
-    const failure = runCheck(
-      parts[i],
-      'mjs',
-      `In bundle module ${i / 2} of ${moduleCount}:`
-    );
-    if (failure !== null) return failure;
+    const label = `In bundle module ${i / 2} of ${moduleCount}:`;
+    const failure = runCheck(parts[i], 'mjs', label);
+    if (failure === null) continue;
+    if (comparable && runCheck(originalParts![i], 'mjs', '') !== null) {
+      warnUnjudgeableModule(i / 2);
+      continue;
+    }
+    return failure;
   }
   return null;
 };
