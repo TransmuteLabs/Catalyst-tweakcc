@@ -981,6 +981,83 @@ export function listBunModules(nativeInstallationPath: string): Array<{
   }
 }
 
+/**
+ * Diagnostic: which parts of the .bun payload no pointer accounts for.
+ *
+ * A repack writes back only what the module table points at, so any region the
+ * table does not cover is silently dropped. That is invisible in a round-trip
+ * of module CONTENTS -- they compare equal -- and shows up only as a binary
+ * that no longer runs. This reports the gaps so a container change can be named
+ * instead of guessed at.
+ */
+export function reportBunCoverage(nativeInstallationPath: string): {
+  payloadSize: number;
+  covered: number;
+  gaps: Array<{ start: number; length: number; preview: string }>;
+} | null {
+  try {
+    LIEF.logging.disable();
+    const binary = LIEF.parse(nativeInstallationPath);
+    const { bunOffsets, bunData, moduleStructSize } = getBunData(binary);
+
+    const spans: Array<[number, number]> = [];
+    const add = (ptr: StringPointer) => {
+      if (ptr.length > 0) spans.push([ptr.offset, ptr.offset + ptr.length]);
+    };
+    add(bunOffsets.modulesPtr);
+    add(bunOffsets.compileExecArgvPtr);
+    mapModules(bunData, bunOffsets, moduleStructSize, module => {
+      add(module.name);
+      add(module.contents);
+      add(module.sourcemap);
+      add(module.bytecode);
+      if (moduleStructSize === SIZEOF_MODULE_NEW) {
+        add(module.moduleInfo);
+        add(module.bytecodeOriginPath);
+      }
+      return undefined;
+    });
+
+    spans.sort((a, b) => a[0] - b[0]);
+    const gaps: Array<{ start: number; length: number; preview: string }> = [];
+    let covered = 0;
+    let cursor = 0;
+    for (const [start, end] of spans) {
+      if (start > cursor) {
+        const length = start - cursor;
+        if (length > 4096) {
+          gaps.push({
+            start: cursor,
+            length,
+            preview: bunData
+              .subarray(cursor, Math.min(cursor + 120, start))
+              .toString('utf-8')
+              .replace(/[^\x20-\x7e]/g, '.'),
+          });
+        }
+        cursor = start;
+      }
+      if (end > cursor) {
+        covered += end - cursor;
+        cursor = end;
+      }
+    }
+    if (bunData.length > cursor && bunData.length - cursor > 4096) {
+      gaps.push({
+        start: cursor,
+        length: bunData.length - cursor,
+        preview: bunData
+          .subarray(cursor, cursor + 120)
+          .toString('utf-8')
+          .replace(/[^\x20-\x7e]/g, '.'),
+      });
+    }
+    return { payloadSize: bunData.length, covered, gaps };
+  } catch {
+    return null;
+  }
+}
+
 export function extractClaudeJsFromNativeInstallation(
   nativeInstallationPath: string
 ): Buffer | null {
