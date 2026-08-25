@@ -641,6 +641,10 @@ export const applyCustomization = async (
     content = await fs.readFile(ccInstInfo.cliPath, { encoding: 'utf8' });
   }
 
+  // Kept for the parse gate: on a code-split bundle it checks the modules the
+  // patches changed, which it can only identify by comparing against this.
+  const originalContent = content;
+
   // Collect all patch results
   const allResults: PatchResult[] = [];
 
@@ -978,7 +982,7 @@ export const applyCustomization = async (
   // Verify the patched bundle parses before writing it
   // ==========================================================================
   try {
-    assertPatchedBundleParses(content);
+    assertPatchedBundleParses(content, originalContent);
   } catch (err) {
     if (!(err instanceof PatchedBundleParseError)) {
       throw err;

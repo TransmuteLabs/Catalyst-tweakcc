@@ -17,7 +17,57 @@ const BROKEN_869 =
   'var out = `${l?`\\\\`${y}\\\\``:y}`;\n' +
   'module.exports = out;\n';
 
+const B = (n: number) => `\n/*__tweakcc_module_boundary_${n}__*/\n`;
+
+// Two ES modules joined the way the extractor joins them from 2.1.242 on. As one
+// unit this is not a program in any goal -- `.cjs` rejects `export`, and one
+// module goal rejects the second `const x`.
+const SPLIT_OK =
+  'const x=1;export{x as a};' + B(1) + 'const x=2;export{x as b};';
+const SPLIT_BROKEN_SECOND =
+  'const x=1;export{x as a};' + B(1) + 'const x=2;export{x as};';
+
 describe('assertPatchedBundleParses', () => {
+  it('accepts a code-split bundle that no single-unit parse could accept', () => {
+    expect(() => assertPatchedBundleParses(SPLIT_OK)).not.toThrow();
+  });
+
+  it('rejects a code-split bundle when one module is broken', () => {
+    expect(() => assertPatchedBundleParses(SPLIT_BROKEN_SECOND)).toThrow(
+      PatchedBundleParseError
+    );
+  });
+
+  it('names the module that failed', () => {
+    let caught: unknown;
+    try {
+      assertPatchedBundleParses(SPLIT_BROKEN_SECOND);
+    } catch (err) {
+      caught = err;
+    }
+    expect(String((caught as Error).message)).toContain('bundle module 1 of 2');
+  });
+
+  it('skips modules the patches did not change', () => {
+    // Module 1 is broken but identical to the original, so it is not this
+    // apply's doing and is not checked; module 0 changed and is fine.
+    const original =
+      'const x=1;export{x as a};' + B(1) + 'const x=2;export{x as};';
+    const patched =
+      'const x=3;export{x as a};' + B(1) + 'const x=2;export{x as};';
+    expect(() => assertPatchedBundleParses(patched, original)).not.toThrow();
+  });
+
+  it('still checks a changed module when an original is supplied', () => {
+    const original =
+      'const x=1;export{x as a};' + B(1) + 'const x=2;export{x as b};';
+    const patched =
+      'const x=1;export{x as a};' + B(1) + 'const x=2;export{x as};';
+    expect(() => assertPatchedBundleParses(patched, original)).toThrow(
+      PatchedBundleParseError
+    );
+  });
+
   it('does not throw on valid CommonJS', () => {
     const valid = 'const x = 1;\nmodule.exports = { x };\n';
     expect(() => assertPatchedBundleParses(valid)).not.toThrow();

@@ -5,6 +5,8 @@ import * as path from 'node:path';
 
 import chalk from 'chalk';
 
+import { MODULE_BOUNDARY_SPLIT_RE } from '../nativeInstallation';
+
 export class PatchedBundleParseError extends Error {
   constructor(message: string) {
     super(message);
@@ -84,19 +86,21 @@ export const isParseFailureExit = (err: unknown): boolean =>
   err != null && typeof (err as { status?: unknown }).status === 'number';
 
 /**
- * Parses the fully-patched bundle with `node --check` and throws
- * PatchedBundleParseError if it does not parse. The bundle is CommonJS
- * (`@bun-cjs`), so the temp file uses a `.cjs` extension to pin CommonJS parsing
- * regardless of any ambient package.json "type". A real parser is used rather
- * than `new Function` / `vm.compileFunction`, which impose a bare function-body
- * context that diverges from module parsing. `node --check` writes its
- * diagnostic to stderr and then exits, which truncates a piped stderr on long
- * lines, so stderr is captured to a file. The check is bounded by a timeout.
- * Only a genuine non-zero exit is treated as a parse failure; a timeout, signal,
- * spawn failure, or an unwritable temp file warns and skips the check, so an
- * operational problem never blocks an otherwise-valid apply.
+ * Parses one unit with `node --check`, in a temp file whose extension pins the
+ * parse goal. A real parser is used rather than `new Function` /
+ * `vm.compileFunction`, which impose a bare function-body context that diverges
+ * from module parsing. `node --check` writes its diagnostic to stderr and then
+ * exits, which truncates a piped stderr on long lines, so stderr is captured to
+ * a file. The check is bounded by a timeout. Only a genuine non-zero exit is
+ * treated as a parse failure; a timeout, signal, spawn failure, or an unwritable
+ * temp file warns and skips the check, so an operational problem never blocks an
+ * otherwise-valid apply.
  */
-export const assertPatchedBundleParses = (content: string): void => {
+const checkOneUnit = (
+  content: string,
+  extension: string,
+  label: string
+): void => {
   let dir: string;
   try {
     dir = fsSync.mkdtempSync(path.join(os.tmpdir(), 'tweakcc-parse-'));
@@ -109,7 +113,7 @@ export const assertPatchedBundleParses = (content: string): void => {
     return;
   }
 
-  const tmpFile = path.join(dir, 'bundle.cjs');
+  const tmpFile = path.join(dir, `bundle.${extension}`);
   const errFile = path.join(dir, 'stderr.txt');
   try {
     try {
@@ -167,7 +171,10 @@ export const assertPatchedBundleParses = (content: string): void => {
       } catch {
         // The sanitizer synthesizes a message when stderr is unavailable.
       }
-      throw new PatchedBundleParseError(sanitizeParseError(stderr, tmpFile));
+      const detail = sanitizeParseError(stderr, tmpFile);
+      throw new PatchedBundleParseError(
+        label ? `${label}\n\n${detail}` : detail
+      );
     }
   } finally {
     try {
@@ -175,5 +182,62 @@ export const assertPatchedBundleParses = (content: string): void => {
     } catch {
       // Best-effort cleanup of the temp directory.
     }
+  }
+};
+
+/**
+ * Verifies that the fully-patched bundle still parses.
+ *
+ * Which unit is parsed depends on the shape of the bundle, and getting that
+ * wrong is not a false alarm -- it discards every customization.
+ *
+ * Up to 2.1.241 the product is one CommonJS module (`@bun-cjs`), and the whole
+ * text is checked as `.cjs`.
+ *
+ * From 2.1.242 it is ~1400 ES modules, which the extractor joins with a marker
+ * between them. That text is not a program in any goal: as CommonJS the first
+ * `export{...}` is a syntax error, and as one module the modules' top-level
+ * declarations collide. Checking it as a unit therefore fails on every such
+ * bundle no matter what the patches did -- observed on 2.1.246, where a clean
+ * apply was rejected with `Unexpected token 'export'` and the binary was left
+ * unpatched. The split bundle is instead checked one module at a time, as
+ * `.mjs`.
+ *
+ * Only modules the patches actually changed are checked, which is both what the
+ * gate is for and what keeps it to a handful of subprocesses instead of ~1400.
+ * Without the original text to compare against, every module is checked.
+ */
+export const assertPatchedBundleParses = (
+  content: string,
+  originalContent?: string
+): void => {
+  const splitter = new RegExp(MODULE_BOUNDARY_SPLIT_RE.source, 'g');
+  // With a capturing group, `split` interleaves the module ordinals:
+  // [text, ord, text, ord, text, ...].
+  const parts = content.split(splitter);
+
+  if (parts.length === 1) {
+    checkOneUnit(content, 'cjs', '');
+    return;
+  }
+
+  const originalParts =
+    originalContent === undefined
+      ? undefined
+      : originalContent.split(new RegExp(MODULE_BOUNDARY_SPLIT_RE.source, 'g'));
+  const comparable =
+    originalParts !== undefined && originalParts.length === parts.length;
+
+  // The marker before part i carries the ordinal i/2, so a part's position in
+  // the joined text is i/2 -- reported rather than the bun module index, which
+  // only the binary knows.
+  const moduleCount = (parts.length + 1) / 2;
+  for (let i = 0; i < parts.length; i += 2) {
+    if (comparable && originalParts![i] === parts[i]) continue;
+    checkOneUnit(
+      parts[i],
+      'mjs',
+      `In bundle module ${i / 2} of ${moduleCount}:`
+    );
   }
 };
