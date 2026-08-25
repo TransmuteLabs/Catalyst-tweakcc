@@ -36,25 +36,48 @@ import { showDiff } from './index';
  */
 
 export const writeThinkingVisibility = (oldFile: string): string | null => {
-  // Unified pattern that matches both formats:
-  // - Group 1: `case"thinking":` (+/- `{`)
-  // - Group 2: `if(...) return null;` (the early return we want to remove)
-  // - Group 3: Everything from `{` or return up to `isTranscriptMode:`
-  // - Then the variable name followed by comma (replaced with `true,`)
+  // What ties the guard to the element is the pair of variable names, not their
+  // position: the early return is `if(!A&&!B)` exactly when the element carries
+  // `isTranscriptMode:A,verbose:B`. Anchoring on that pair instead of on the
+  // distance between them is what survived 2.1.239, where a `shouldShowDot`
+  // branch moved in between and pushed the guard out of the old 80-character
+  // window. Measured across every bundle from 2.1.81 to 2.1.246: exactly one
+  // match in each, and the same edit as before on the versions that already
+  // worked.
+  //   1 `case"thinking":` (+/- `{`)
+  //   2 whatever the case opens with, which may be a whole sibling branch
+  //   3 the early return to delete
+  //   4,5 the transcript-mode and verbose variables
+  //   6 up to and including `isTranscriptMode:`, whose value becomes `true`
+  //   7 the `verbose:B` tail, carried over untouched
   const pattern =
-    /(case"thinking":\{?)(if\(.{0,80}?\)\s*(?:\{\s*return null\s*;?\s*\}|return null\s*;?))(.{0,400}?isTranscriptMode:)([$\w]+)\s*,/;
+    /(case"thinking":\{?)((?:(?!case")[\s\S]){0,800}?)(if\(!([$\w]+)&&!([$\w]+)\)\s*(?:\{\s*return null\s*;?\s*\}|return null\s*;?))((?:(?!case")[\s\S]){0,800}?isTranscriptMode:)\4\s*,(\s*verbose:\5\s*[,}])/g;
 
-  const match = oldFile.match(pattern);
+  const matches = [...oldFile.matchAll(pattern)];
 
-  if (!match || match.index === undefined) {
+  if (matches.length === 0) {
     console.error(
       'patch: thinkingVisibility: failed to find thinking visibility pattern'
     );
     return null;
   }
 
-  // Replacement: skip match[2] (removes the if-return-null), set isTranscriptMode to true
-  const replacement = match[1] + match[3] + 'true,';
+  // Two candidates would mean the pair no longer identifies the site, and the
+  // loser is a thinking block that keeps hiding itself. Refuse rather than guess.
+  if (matches.length > 1) {
+    console.error(
+      `patch: thinkingVisibility: ${matches.length} thinking cases carry the same ` +
+        'guard/element pair, refusing to guess which one to unhide'
+    );
+    return null;
+  }
+
+  const match = matches[0];
+  if (match.index === undefined) return null;
+
+  // Everything is carried over except the early return, which is dropped, and
+  // the transcript-mode value, which becomes `true`.
+  const replacement = match[1] + match[2] + match[6] + 'true,' + match[7];
 
   const startIndex = match.index;
   const endIndex = startIndex + match[0].length;

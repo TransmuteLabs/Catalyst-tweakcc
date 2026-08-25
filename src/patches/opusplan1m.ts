@@ -10,7 +10,7 @@
 //
 // See: https://github.com/Piebald-AI/tweakcc/issues/108
 
-import { escapeIdent, showDiff } from './index';
+import { showDiff } from './index';
 
 /**
  * Patch 1: Fix the mode-switching function (bF) to recognize opusplan[1m]
@@ -208,13 +208,18 @@ const patchLabelFunction = (oldFile: string): string | null => {
  * We'll add a similar function for opusplan[1m] and inject it where opusplan options are added.
  */
 const patchModelSelectorOptions = (oldFile: string): string | null => {
-  // Find where opusplan is added to the model list: [...A, Mm3()]
-  // Old pattern: if (K === "opusplan") return [...A, Mm3()];
-  // New pattern: if (K === "opusplan") return v1A([...A, Mm3()]);
-  // We need to add a similar case for opusplan[1m]
-  // Capture groups: 1=fullMatch, 2=conditionVar (K), 3=listVar (A), 4=funcName (Mm3)
+  // The construct has taken three shapes across versions, differing only in how
+  // the array is wrapped:
+  //   <=2.1.206  if(K==="opusplan")return[...A,Mm3()];
+  //              if(K==="opusplan")return v1A([...A,Mm3()]);
+  //   >=2.1.233  else if(s==="opusplan")return P([...o,ct()],n);
+  // The 2.1.233 shape is what the old locator missed: it allowed a wrapper call
+  // but not a second argument to it. Rather than enumerate wrappers, the call is
+  // reproduced verbatim around a new array — group 2 is the callee with its open
+  // paren, group 5 any further arguments, group 6 the closing paren, and only the
+  // array contents change.
   const pattern =
-    /(if\s*\(\s*([$\w]+)\s*===\s*"opusplan"\s*\)\s*return\s*(?:[$\w]+\()?\[\s*\.\.\.([$\w]+)\s*,\s*([$\w]+)\(\)\s*\]\)?;)/;
+    /if\s*\(\s*([$\w]+)\s*===\s*"opusplan"\s*\)\s*return\s*(?:([$\w]+)\(\s*)?\[\s*\.\.\.([$\w]+)\s*,\s*([$\w]+)\(\)\s*\]((?:\s*,\s*[$\w]+)*)\s*(\)?)\s*;/;
 
   const match = oldFile.match(pattern);
   if (!match || match.index === undefined) {
@@ -224,20 +229,33 @@ const patchModelSelectorOptions = (oldFile: string): string | null => {
     return null;
   }
 
-  const [fullMatch, , varName, listVar] = match;
+  const [fullMatch, varName, wrapFn, listVar, , extraArgs, closeParen] = match;
 
-  const wrapperMatch = fullMatch.match(
-    new RegExp(`return\\s*([$\\w]+)\\(\\s*\\[\\.\\.\\.${escapeIdent(listVar)}`)
-  );
-  const wrapFn = wrapperMatch ? wrapperMatch[1] : null;
+  // A wrapper without its closing paren (or the reverse) means the regex latched
+  // onto something that only looks like the call. Emitting from it would produce
+  // unbalanced parentheses in a 30MB bundle, which surfaces as a startup crash
+  // rather than as a failed patch.
+  if (!!wrapFn !== !!closeParen) {
+    console.error(
+      'patch: opusplan1m: patchModelSelectorOptions: the model list call is not ' +
+        'balanced (wrapper and closing parenthesis disagree), refusing to rewrite it'
+    );
+    return null;
+  }
 
   const newEntry = `{value:"opusplan[1m]",label:"Opus Plan Mode 1M",description:"Use Opus in plan mode, Sonnet (1M context) otherwise"}`;
-  const returnExpr = wrapFn
-    ? `${wrapFn}([...${listVar},${newEntry}])`
-    : `[...${listVar},${newEntry}]`;
+  const returnExpr =
+    (wrapFn ? `${wrapFn}(` : '') +
+    `[...${listVar},${newEntry}]` +
+    extraArgs +
+    closeParen;
 
+  // Appended as `else if`, not as a fresh `if`: from 2.1.233 this statement is a
+  // link in an else-if chain, and a fresh `if` would adopt the rest of the chain
+  // as its own else branch. That happens to behave the same today only because
+  // every earlier branch returns; `else` keeps it correct without that argument.
   const replacement =
-    fullMatch + `if(${varName}==="opusplan[1m]")return ${returnExpr};`;
+    fullMatch + `else if(${varName}==="opusplan[1m]")return ${returnExpr};`;
 
   const newFile =
     oldFile.slice(0, match.index) +
@@ -264,10 +282,14 @@ const patchModelSelectorOptions = (oldFile: string): string | null => {
  * and inject before the opusplan conditional return.
  */
 const patchAlwaysShowInModelSelector = (oldFile: string): string | null => {
-  // Find the pattern: if(K===null||A.some((VAR)=>VAR.value===K))return A;
-  // This is right before the opusplan conditional, and we want to inject pushes before this
+  // if(K===null||A.some((V)=>V.value===K))return A;   -- the pushes go before it.
+  // Same 2.1.233 change as in patch 5: the wrapper around the list gained a
+  // second argument (`return WAt(r,t)`), which the old locator's `[$\w]+\)?;`
+  // tail could not cross. Since only the injection point matters here, the tail
+  // is matched loosely but the three names are tied together by backreference,
+  // so this cannot latch onto an unrelated `.some()` check.
   const pattern =
-    /(if\s*\(\s*[$\w]+\s*===\s*null\s*\|\|\s*([$\w]+)\.some\s*\(\s*\(\s*[$\w]+\s*\)\s*=>\s*[$\w]+\.value\s*===\s*[$\w]+\s*\)\s*\)\s*return\s*(?:[$\w]+\()?[$\w]+\)?\s*;)/;
+    /if\s*\(\s*([$\w]+)\s*===\s*null\s*\|\|\s*([$\w]+)\.some\s*\(\s*\(\s*([$\w]+)\s*\)\s*=>\s*\3\.value\s*===\s*\1\s*\)\s*\)\s*return\s*(?:[$\w]+\(\s*)?\2((?:\s*,\s*[$\w]+)*)\s*\)?\s*;/;
 
   const match = oldFile.match(pattern);
   if (!match || match.index === undefined) {
@@ -277,7 +299,7 @@ const patchAlwaysShowInModelSelector = (oldFile: string): string | null => {
     return null;
   }
 
-  const [, , listVar] = match;
+  const listVar = match[2];
 
   // Inject pushes BEFORE the conditional return
   // This ensures opusplan and opusplan[1m] are always in the list
