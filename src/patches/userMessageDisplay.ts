@@ -152,8 +152,13 @@ export const writeUserMessageDisplay = (
   // Replace only the child assignment so React compiler cache bookkeeping remains intact.
   // CC >=2.1.x renders via the JSX automatic runtime, so the assignment is
   // `B=X.jsx(SUB,{text:VAR,...})` rather than `B=X.createElement(SUB,{text:VAR,...})`.
+  // From 2.1.242 the bundle is code-split and each chunk imports the runtime as
+  // a plain binding, so the assignment is a bare `B=o(SUB,{text:VAR,...})` with
+  // no namespace in front of it -- accepted as a third callee form, tried last
+  // so a namespaced call still wins where one exists. The prop set and the
+  // "No content found" anchor are what identify the site; the callee never was.
   const memoizedChildPattern =
-    /(No content found in user prompt message.{0,1200}?)([$\w]+)=([$\w]+(?:\.default)?\.(?:createElement|jsxs?))\([$\w]+,\{text:([$\w]+),useBriefLayout:[$\w]+,timestamp:[$\w]+\}\)/;
+    /(No content found in user prompt message.{0,1200}?)([$\w]+)=([$\w]+(?:\.default)?\.(?:createElement|jsxs?)|[$\w]+)\([$\w]+,\{text:([$\w]+),useBriefLayout:[$\w]+,timestamp:[$\w]+\}\)/;
 
   const oldMatch = oldFile.match(pattern);
   const newMatch = oldMatch ? null : oldFile.match(newPattern);

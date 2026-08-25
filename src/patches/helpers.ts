@@ -160,6 +160,28 @@ export const getReactVar = (fileContents: string): string | undefined => {
     return undefined;
   }
 
+  // A code-split bundle (CC >=2.1.242) has no React namespace to find, and
+  // saying "failed to find reactModuleVarNonBun" would name a cause that is not
+  // the cause. Every chunk renders through the JSX automatic runtime, imported
+  // under a chunk-local name; `createElement` survives in the bundle only as
+  // `document.createElement` from vendored web code. Measured on 2.1.246: zero
+  // occurrences of the interop this function looks for, and no React handle any
+  // injected code could reach.
+  //
+  // So the diagnosis is reported for what it is. A caller that needs to emit
+  // elements into such a bundle cannot be handed one global name: it has to
+  // find the runtime binding of the chunk it is injecting into, and emit
+  // runtime calls rather than createElement.
+  if (/\n\/\*__tweakcc_module_boundary_\d+__\*\/\n/.test(fileContents)) {
+    console.log(
+      'patch: getReactVar: this bundle is code-split and renders through the JSX ' +
+        'runtime, so there is no React namespace to resolve; a patch that needs to ' +
+        "emit elements must use the injection chunk's own runtime binding"
+    );
+    reactVarCache = undefined;
+    return undefined;
+  }
+
   // Try non-bun first (reactModuleNameNonBun)
   const reactModuleVarNonBun = getReactModuleNameNonBun(fileContents);
   if (!reactModuleVarNonBun) {

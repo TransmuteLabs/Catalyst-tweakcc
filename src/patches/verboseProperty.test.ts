@@ -15,6 +15,16 @@ describe('writeVerboseProperty', () => {
     expect(result).not.toContain('verbose:p');
   });
 
+  it('forces verbose:true when the runtime is a bare binding (CC >=2.1.242)', () => {
+    // A code-split chunk imports the runtime under a plain name, so the call
+    // has no namespace and no recognisable callee: `a(C,{...})`.
+    const input = `const a=1;kq(HJa,{${spinnerProps}});const b=2;`;
+    const result = writeVerboseProperty(input);
+    expect(result).not.toBeNull();
+    expect(result).toContain('verbose:true');
+    expect(result).not.toContain('verbose:p');
+  });
+
   it('forces verbose:true on the JSX automatic-runtime form (jsxs)', () => {
     const input = `Q.jsxs(HJa,{${spinnerProps}})`;
     const result = writeVerboseProperty(input);

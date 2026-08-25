@@ -5,9 +5,14 @@ import { LocationResult, showDiff } from './index';
 const getVerbosePropertyLocation = (oldFile: string): LocationResult | null => {
   // CC >=2.1.x compiles the UI with the React JSX automatic runtime, so the
   // spinner element is emitted as `X.jsx(C,{...})` / `X.jsxs(C,{...})` rather
-  // than `X.createElement(C,{...})`. Accept all three call forms.
+  // than `X.createElement(C,{...})`. From 2.1.242 the bundle is code-split and
+  // each chunk imports the runtime as a plain binding, so the call is a bare
+  // `a(C,{...})` with no recognisable callee name at all. Accept all four
+  // forms: what identifies this site is the property set, not the callee --
+  // the four lookaheads together occur three times in the 2.1.246 bundle and
+  // only one of those also carries `verbose:`.
   const createElementPattern =
-    /(?:[$\w]+\.)?(?:createElement|jsxs?)\([$\w]+,\{(?=[^}]*responseLengthRef:)(?=[^}]*spinnerSuffix:)(?=[^}]*thinkingStatus:)(?=[^}]*isCompacting:)[^}]*verbose:[^,}]+[^}]*\}/;
+    /(?:[$\w]+\.)?(?:createElement|jsxs?|[$\w]+)\([$\w]+,\{(?=[^}]*responseLengthRef:)(?=[^}]*spinnerSuffix:)(?=[^}]*thinkingStatus:)(?=[^}]*isCompacting:)[^}]*verbose:[^,}]+[^}]*\}/;
   const legacyCreateElementPattern =
     /(?:createElement|jsxs?)\([$\w]+,\{[^}]+spinnerTip[^}]+overrideMessage[^}]+\}/;
   const createElementMatch =

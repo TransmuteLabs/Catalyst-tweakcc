@@ -1,7 +1,7 @@
 // Conversation title management patch for Claude Code
 // Adds ability to set conversation titles and persist them
 
-import { showDiff, getReactVar, getRequireFuncName } from './index';
+import { showDiff, getRequireFuncName } from './index';
 import { writeSlashCommandDefinition as writeSlashCmd } from './slashCommands';
 
 // ============================================================================
@@ -12,11 +12,13 @@ import { writeSlashCommandDefinition as writeSlashCmd } from './slashCommands';
  * Sub-patch 1: Write the /title slash command definition
  */
 export const writeTitleSlashCommand = (oldFile: string): string | null => {
-  const reactVar = getReactVar(oldFile);
-  if (!reactVar) {
-    console.error('patch: conversationTitle: failed to find React variable');
-    return null;
-  }
+  // No React handle is asked for here on purpose. This used to resolve one and
+  // bail when it could not, but the command definition below is plain
+  // JavaScript -- the value was never substituted into anything. The gate cost
+  // nothing while React resolved and killed the patch outright once it stopped:
+  // on a code-split bundle (CC >=2.1.242) there is no React namespace to find,
+  // because the UI renders through the JSX runtime, so /title disappeared over
+  // a dependency it does not have.
 
   // Generate the slash command definition
   const commandDef = `, {
