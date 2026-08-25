@@ -154,6 +154,7 @@ const BUN_TRAILER = Buffer.from('\n---- Bun! ----\n');
 
 // Size constants for binary structures
 const SIZEOF_OFFSETS = 32;
+const NULL_TERMINATOR = Buffer.from([0]);
 const SIZEOF_STRING_POINTER = 8;
 // Module struct sizes vary by Bun version:
 // - Old format (pre-ESM bytecode, before Bun ~1.3.7): 4 StringPointers + 4 u8s = 36 bytes
@@ -984,11 +985,15 @@ export function listBunModules(nativeInstallationPath: string): Array<{
 /**
  * Diagnostic: which parts of the .bun payload no pointer accounts for.
  *
- * A repack writes back only what the module table points at, so any region the
- * table does not cover is silently dropped. That is invisible in a round-trip
- * of module CONTENTS -- they compare equal -- and shows up only as a binary
- * that no longer runs. This reports the gaps so a container change can be named
- * instead of guessed at.
+ * Regions no StringPointer accounts for are not a curiosity: 2.1.246 carries a
+ * 9,878,219-byte one, and a repack that laid the payload out afresh dropped it
+ * and produced a binary the kernel killed on exec. A round-trip of module
+ * CONTENTS cannot see that -- they compare equal either way -- so this measures
+ * the payload from the other side and names what is unaccounted for.
+ *
+ * rebuildBunData now carries [data] over verbatim, so the gaps survive by
+ * construction. This stays as the measurement that says so, and as the first
+ * thing to run when a new version stops working.
  */
 export function reportBunCoverage(nativeInstallationPath: string): {
   payloadSize: number;
@@ -1121,227 +1126,107 @@ function rebuildBunData(
   modifiedModules: Map<number, Buffer> | null,
   moduleStructSize: number
 ): Buffer {
-  // Phase 1: Collect all string data
-  const stringsData: Buffer[] = [];
-  const modulesMetadata: Array<{
-    name: Buffer;
-    contents: Buffer;
-    sourcemap: Buffer;
-    bytecode: Buffer;
-    moduleInfo: Buffer;
-    bytecodeOriginPath: Buffer;
-    encoding: number;
-    loader: number;
-    moduleFormat: number;
-    side: number;
-  }> = [];
-
-  // Use mapModules to iterate and collect module data
-  mapModules(bunData, bunOffsets, moduleStructSize, (module, _name, index) => {
-    const nameBytes = getStringPointerContent(bunData, module.name);
-
-    // Patched contents for this module, or the original bytes.
-    //
-    // Bytecode is copied through unchanged, including for modified modules.
-    // That is deliberate: patched 2.1.239 images keep the full 215 MB
-    // bytecode blob next to an edited source and the edits do take effect, so
-    // a stale blob is discarded at load. If a future image ever runs stale
-    // bytecode instead, the symptom is the smoke gate failing to see patched
-    // behaviour, and the fix is to blank `bytecode` for modified modules here.
-    const patched = modifiedModules?.get(index);
-    const contentsBytes =
-      patched ?? getStringPointerContent(bunData, module.contents);
-
-    const sourcemapBytes = getStringPointerContent(bunData, module.sourcemap);
-    const bytecodeBytes = getStringPointerContent(bunData, module.bytecode);
-    const moduleInfoBytes = getStringPointerContent(bunData, module.moduleInfo);
-    const bytecodeOriginPathBytes = getStringPointerContent(
-      bunData,
-      module.bytecodeOriginPath
+  // The payload is laid out as [data][OFFSETS][BUN_TRAILER]. Everything the
+  // module table points at lives in [data], and so does the table itself.
+  const offsetsOffset = bunData.length - BUN_TRAILER.length - SIZEOF_OFFSETS;
+  if (offsetsOffset <= 0) {
+    throw new Error(
+      'rebuildBunData: payload is too small to hold OFFSETS and the trailer'
     );
+  }
+  if (
+    !bunData.subarray(bunData.length - BUN_TRAILER.length).equals(BUN_TRAILER)
+  ) {
+    throw new Error(
+      'rebuildBunData: payload does not end with the Bun trailer'
+    );
+  }
+  // byteCount is the size of [data]. Asserting it rather than assuming it: the
+  // whole method below rests on this being where OFFSETS starts, and a Bun
+  // version that changed the layout would otherwise be discovered as a binary
+  // that no longer runs.
+  const declared =
+    typeof bunOffsets.byteCount === 'bigint'
+      ? Number(bunOffsets.byteCount)
+      : bunOffsets.byteCount;
+  if (declared !== offsetsOffset) {
+    throw new Error(
+      `rebuildBunData: OFFSETS.byteCount is ${declared} but [data] ends at ${offsetsOffset}; the payload layout is not what this code assumes`
+    );
+  }
 
-    modulesMetadata.push({
-      name: nameBytes,
-      contents: contentsBytes,
-      sourcemap: sourcemapBytes,
-      bytecode: bytecodeBytes,
-      moduleInfo: moduleInfoBytes,
-      bytecodeOriginPath: bytecodeOriginPathBytes,
-      encoding: module.encoding,
-      loader: module.loader,
-      moduleFormat: module.moduleFormat,
-      side: module.side,
-    });
+  // [data] is carried over VERBATIM and modified contents are appended after
+  // it, instead of the whole region being laid out afresh from the module
+  // table. A rebuilt layout only reproduces what some pointer points at, and
+  // 2.1.246 showed what that costs: its payload carries a 9,878,219-byte region
+  // no pointer in the table accounts for, the rebuild dropped it, and the
+  // kernel killed the result on exec. Nothing had gone wrong that a round-trip
+  // of module CONTENTS could see -- they compared equal byte for byte.
+  //
+  // Carrying [data] over means anything this code does not understand keeps
+  // both its bytes and its absolute offset, which is what an unknown region
+  // needs: something references it, by an offset this code cannot rewrite
+  // because it cannot find it.
+  //
+  // The cost is the old copy of each replaced module, left behind as dead
+  // space. Only modules whose contents actually CHANGED are appended, so a
+  // split bundle pays for the handful of chunks a patch touches rather than
+  // for all ~1400.
+  const head = Buffer.from(bunData.subarray(0, offsetsOffset));
+  const tableOffset = bunOffsets.modulesPtr.offset;
+  const appended: Buffer[] = [];
+  let appendedLength = 0;
+  let replaced = 0;
 
-    if (moduleStructSize === SIZEOF_MODULE_NEW) {
-      stringsData.push(
-        nameBytes,
-        contentsBytes,
-        sourcemapBytes,
-        bytecodeBytes,
-        moduleInfoBytes,
-        bytecodeOriginPathBytes
-      );
-    } else {
-      stringsData.push(nameBytes, contentsBytes, sourcemapBytes, bytecodeBytes);
+  mapModules(bunData, bunOffsets, moduleStructSize, (module, _name, index) => {
+    const replacement = modifiedModules?.get(index);
+    if (replacement === undefined) return undefined;
+    if (replacement.equals(getStringPointerContent(bunData, module.contents))) {
+      return undefined;
     }
+
+    // Only `contents` moves. Bytecode, sourcemap and moduleInfo keep both their
+    // bytes and their pointers, including for a module whose source was edited.
+    // That is deliberate: patched 2.1.239 images keep the full 215 MB bytecode
+    // blob next to edited source and the edits do take effect, so a stale blob
+    // is discarded at load. If a future image ever runs stale bytecode instead,
+    // the symptom is the smoke gate not seeing patched behaviour, and the fix
+    // is to zero this module's `bytecode` StringPointer here.
+    const newOffset = head.length + appendedLength;
+    if (newOffset + replacement.length > 0xffffffff) {
+      // A StringPointer addresses the payload with a u32, so appending cannot
+      // walk past 4 GiB. Refusing beats writing a truncated offset that would
+      // point the loader at the wrong bytes.
+      throw new Error(
+        'rebuildBunData: appended contents push the payload past the 4 GiB a StringPointer can address'
+      );
+    }
+    appended.push(replacement, NULL_TERMINATOR);
+    appendedLength += replacement.length + 1;
+
+    // `contents` is the second StringPointer in the struct, so eight bytes in.
+    const field = tableOffset + index * moduleStructSize + 8;
+    head.writeUInt32LE(newOffset, field);
+    head.writeUInt32LE(replacement.length, field + 4);
+    replaced += 1;
     return undefined;
   });
 
-  const stringsPerModule = moduleStructSize === SIZEOF_MODULE_NEW ? 6 : 4;
+  const byteCount = head.length + appendedLength;
+  const offsets = Buffer.alloc(SIZEOF_OFFSETS);
+  offsets.writeBigUInt64LE(BigInt(byteCount), 0);
+  offsets.writeUInt32LE(bunOffsets.modulesPtr.offset, 8);
+  offsets.writeUInt32LE(bunOffsets.modulesPtr.length, 12);
+  offsets.writeUInt32LE(bunOffsets.entryPointId, 16);
+  offsets.writeUInt32LE(bunOffsets.compileExecArgvPtr.offset, 20);
+  offsets.writeUInt32LE(bunOffsets.compileExecArgvPtr.length, 24);
+  offsets.writeUInt32LE(bunOffsets.flags, 28);
 
-  // Phase 2: Calculate buffer layout
-  let currentOffset = 0;
-  const stringOffsets: StringPointer[] = [];
-
-  // Allocate space for strings with null terminators
-  for (const stringData of stringsData) {
-    stringOffsets.push({ offset: currentOffset, length: stringData.length });
-    currentOffset += stringData.length + 1; // +1 for null terminator
-  }
-
-  // Module structures
-  const modulesListOffset = currentOffset;
-  const modulesListSize = modulesMetadata.length * moduleStructSize;
-  currentOffset += modulesListSize;
-
-  // compileExecArgv
-  const compileExecArgvBytes = getStringPointerContent(
-    bunData,
-    bunOffsets.compileExecArgvPtr
+  debug(
+    `rebuildBunData: ${replaced} module(s) replaced, payload ${bunData.length} -> ${byteCount + SIZEOF_OFFSETS + BUN_TRAILER.length} bytes`
   );
-  const compileExecArgvOffset = currentOffset;
-  const compileExecArgvLength = compileExecArgvBytes.length;
-  currentOffset += compileExecArgvLength + 1; // +1 for null terminator
 
-  // Offsets structure
-  const offsetsOffset = currentOffset;
-  currentOffset += SIZEOF_OFFSETS;
-
-  // Trailer
-  const trailerOffset = currentOffset;
-  currentOffset += BUN_TRAILER.length;
-
-  // Phase 3: Build the new buffer
-  const newBuffer = Buffer.allocUnsafe(currentOffset);
-  newBuffer.fill(0);
-
-  // Write all strings with null terminators
-  let stringIdx = 0;
-  for (const { offset, length } of stringOffsets) {
-    if (length > 0) {
-      stringsData[stringIdx].copy(newBuffer, offset, 0, length);
-    }
-    newBuffer[offset + length] = 0; // null terminator
-    stringIdx++;
-  }
-
-  // Write compileExecArgv
-  if (compileExecArgvLength > 0) {
-    compileExecArgvBytes.copy(
-      newBuffer,
-      compileExecArgvOffset,
-      0,
-      compileExecArgvLength
-    );
-    newBuffer[compileExecArgvOffset + compileExecArgvLength] = 0;
-  }
-
-  // Build and write module structures
-  for (let i = 0; i < modulesMetadata.length; i++) {
-    const metadata = modulesMetadata[i];
-    const baseStringIdx = i * stringsPerModule;
-
-    const moduleStruct: BunModule = {
-      name: stringOffsets[baseStringIdx],
-      contents: stringOffsets[baseStringIdx + 1],
-      sourcemap: stringOffsets[baseStringIdx + 2],
-      bytecode: stringOffsets[baseStringIdx + 3],
-      moduleInfo:
-        moduleStructSize === SIZEOF_MODULE_NEW
-          ? stringOffsets[baseStringIdx + 4]
-          : { offset: 0, length: 0 },
-      bytecodeOriginPath:
-        moduleStructSize === SIZEOF_MODULE_NEW
-          ? stringOffsets[baseStringIdx + 5]
-          : { offset: 0, length: 0 },
-      encoding: metadata.encoding,
-      loader: metadata.loader,
-      moduleFormat: metadata.moduleFormat,
-      side: metadata.side,
-    };
-
-    // Serialize module structure inline
-    const moduleOffset = modulesListOffset + i * moduleStructSize;
-    let pos = moduleOffset;
-
-    // Write StringPointers (common to both formats)
-    newBuffer.writeUInt32LE(moduleStruct.name.offset, pos);
-    newBuffer.writeUInt32LE(moduleStruct.name.length, pos + 4);
-    pos += 8;
-    newBuffer.writeUInt32LE(moduleStruct.contents.offset, pos);
-    newBuffer.writeUInt32LE(moduleStruct.contents.length, pos + 4);
-    pos += 8;
-    newBuffer.writeUInt32LE(moduleStruct.sourcemap.offset, pos);
-    newBuffer.writeUInt32LE(moduleStruct.sourcemap.length, pos + 4);
-    pos += 8;
-    newBuffer.writeUInt32LE(moduleStruct.bytecode.offset, pos);
-    newBuffer.writeUInt32LE(moduleStruct.bytecode.length, pos + 4);
-    pos += 8;
-
-    // Write new-format-only StringPointers
-    if (moduleStructSize === SIZEOF_MODULE_NEW) {
-      newBuffer.writeUInt32LE(moduleStruct.moduleInfo.offset, pos);
-      newBuffer.writeUInt32LE(moduleStruct.moduleInfo.length, pos + 4);
-      pos += 8;
-      newBuffer.writeUInt32LE(moduleStruct.bytecodeOriginPath.offset, pos);
-      newBuffer.writeUInt32LE(moduleStruct.bytecodeOriginPath.length, pos + 4);
-      pos += 8;
-    }
-
-    // Write enum fields
-    newBuffer.writeUInt8(moduleStruct.encoding, pos);
-    newBuffer.writeUInt8(moduleStruct.loader, pos + 1);
-    newBuffer.writeUInt8(moduleStruct.moduleFormat, pos + 2);
-    newBuffer.writeUInt8(moduleStruct.side, pos + 3);
-  }
-
-  // Build and write Offsets structure inline
-  const newOffsets: BunOffsets = {
-    byteCount: offsetsOffset,
-    modulesPtr: {
-      offset: modulesListOffset,
-      length: modulesListSize,
-    },
-    entryPointId: bunOffsets.entryPointId,
-    compileExecArgvPtr: {
-      offset: compileExecArgvOffset,
-      length: compileExecArgvLength,
-    },
-    flags: bunOffsets.flags,
-  };
-
-  let offsetsPos = offsetsOffset;
-  const byteCount =
-    typeof newOffsets.byteCount === 'bigint'
-      ? newOffsets.byteCount
-      : BigInt(newOffsets.byteCount);
-  newBuffer.writeBigUInt64LE(byteCount, offsetsPos);
-  offsetsPos += 8;
-  newBuffer.writeUInt32LE(newOffsets.modulesPtr.offset, offsetsPos);
-  newBuffer.writeUInt32LE(newOffsets.modulesPtr.length, offsetsPos + 4);
-  offsetsPos += 8;
-  newBuffer.writeUInt32LE(newOffsets.entryPointId, offsetsPos);
-  offsetsPos += 4;
-  newBuffer.writeUInt32LE(newOffsets.compileExecArgvPtr.offset, offsetsPos);
-  newBuffer.writeUInt32LE(newOffsets.compileExecArgvPtr.length, offsetsPos + 4);
-  offsetsPos += 8;
-  newBuffer.writeUInt32LE(newOffsets.flags, offsetsPos);
-
-  // Write trailer
-  BUN_TRAILER.copy(newBuffer, trailerOffset);
-
-  return newBuffer;
+  return Buffer.concat([head, ...appended, offsets, BUN_TRAILER]);
 }
 
 /**
