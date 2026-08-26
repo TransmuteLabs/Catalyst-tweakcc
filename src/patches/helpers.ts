@@ -168,14 +168,21 @@ export const getReactModuleFunctionBun = (
 };
 
 /**
- * Why getReactVar returns nothing on a code-split bundle. Attached by the
- * callers that cannot proceed without a React namespace, so the explanation
- * appears exactly where it is actionable.
+ * Why getReactVar returned nothing, for the callers that cannot proceed
+ * without a React namespace. It takes the bundle because there are two
+ * different reasons and only one of them is the code split: a non-split
+ * bundle whose interop shape moved would otherwise be reported as "code
+ * split", which is a cause that is not the cause -- the exact failure this
+ * whole helper was corrected for one commit earlier.
  */
-export const NO_REACT_NAMESPACE_HINT =
-  'this bundle is code-split and renders through the JSX runtime, so there is ' +
-  'no React namespace to resolve; a patch that needs to emit elements must use ' +
-  "the injection chunk's own runtime binding";
+export const reactVarMissReason = (fileContents: string): string =>
+  /\n\/\*__tweakcc_module_boundary_\d+__\*\/\n/.test(fileContents)
+    ? 'this bundle is code-split and renders through the JSX runtime, so there ' +
+      'is no React namespace to resolve; a patch that needs to emit elements ' +
+      "must use the injection chunk's own runtime binding"
+    : 'this bundle is not code-split, so the React interop is expected to be ' +
+      'present; the shape this helper looks for has moved (see the more ' +
+      'specific getReactVar message above)';
 
 // Cache for React variable to avoid recomputing. Keyed on the bundle it was
 // computed from: the lib surface hands this function a different bundle per
@@ -183,16 +190,20 @@ export const NO_REACT_NAMESPACE_HINT =
 let reactVarCache: string | undefined | null = null;
 let reactVarCacheKey: string | null = null;
 
-// Cache for require function name to avoid recomputing
+// Cache for require function name to avoid recomputing. Keyed on its bundle
+// for the same reason as reactVarCache above: same mechanism, same defect.
 let requireFuncNameCache: string | null = null;
+let requireFuncNameCacheKey: string | null = null;
 
 /**
  * Get the React variable name (cached)
  */
 export const getReactVar = (fileContents: string): string | undefined => {
-  // Return cached value if available
-  if (reactVarCacheKey === fileContents && reactVarCache != null) {
-    return reactVarCache;
+  // Return cached value if available. `undefined` is a RESULT, not a miss:
+  // keying on the bundle lets a negative be cached too, where the old
+  // `!= null` test re-scanned 32 MB on every call for a bundle with no React.
+  if (reactVarCacheKey === fileContents) {
+    return reactVarCache ?? undefined;
   }
   reactVarCacheKey = fileContents;
 
@@ -330,9 +341,13 @@ export const findRequireFunc = (fileContents: string): string | undefined => {
  */
 export const getRequireFuncName = (fileContents: string): string => {
   // Return cached value if available
-  if (requireFuncNameCache != null) {
+  if (
+    requireFuncNameCacheKey === fileContents &&
+    requireFuncNameCache != null
+  ) {
     return requireFuncNameCache;
   }
+  requireFuncNameCacheKey = fileContents;
 
   // Try to find the esbuild-style require function
   const requireFunc = findRequireFunc(fileContents);
@@ -353,6 +368,7 @@ export const getRequireFuncName = (fileContents: string): string => {
  */
 export const clearRequireFuncNameCache = (): void => {
   requireFuncNameCache = null;
+  requireFuncNameCacheKey = null;
 };
 
 /**

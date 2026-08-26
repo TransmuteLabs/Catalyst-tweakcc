@@ -101,7 +101,7 @@ export {
   getReactModuleFunctionBun,
   getReactVar,
   clearReactVarCache,
-  NO_REACT_NAMESPACE_HINT,
+  reactVarMissReason,
   findRequireFunc,
   getRequireFuncName,
   clearRequireFuncNameCache,

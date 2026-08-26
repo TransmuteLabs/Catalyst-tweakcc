@@ -6,7 +6,7 @@ import {
   findTextComponent,
   getReactVar,
   moduleSliceAround,
-  NO_REACT_NAMESPACE_HINT,
+  reactVarMissReason,
   showDiff,
 } from './index';
 
@@ -833,7 +833,7 @@ export const writePatchesAppliedIndication = (
     } else if (!reactVar) {
       console.error(
         'patch: patchesAppliedIndication: PATCH 3 skipped (no React namespace ' +
-          `for the createElement list): ${NO_REACT_NAMESPACE_HINT}`
+          `for the createElement list): ${reactVarMissReason(fileContents)}`
       );
     } else {
       const lines = [];

@@ -98,21 +98,29 @@ const injectRerouteIntoCatch = (
  *
  * So this shape is patched by WRAPPING the reader instead of editing inside
  * it. The wrapper is exit-agnostic: it asks the original for CLAUDE.md, and
- * whichever way the original reports "nothing there" -- absent, error, throw,
- * empty info -- it then tries the alternates. Every memory file (user,
- * project, local, and each step of the parent-directory walk) is read through
- * this one function, so the wrapper covers all of them.
+ * whichever way the original reports "nothing there" -- absent, error, empty
+ * info, or a throw that escapes the reader's own catch -- it then tries the
+ * alternates. The initial read is guarded for that last case; the reader
+ * converts ordinary filesystem failures to a null-info result itself, so the
+ * guard is for the paths it does not convert, and it costs nothing. Every
+ * memory file (user, project, local, and each step of the parent-directory
+ * walk) is read through this one function, so the wrapper covers all of them.
  *
- * Two details in the wrapper are load-bearing:
+ * What is load-bearing, and what only looks it:
  *
- *   - The storage descriptor is DROPPED for the alternates (`void 0`). A
- *     descriptor names one stored key; reusing it would hand back CLAUDE.md's
- *     own bytes under the alternate's name, which is worse than not finding
- *     the file.
- *   - The third parameter is the resolved path (the caller passes the
- *     symlink-resolved twin of the first). When it too ends in CLAUDE.md it
- *     is rewritten to the alternate, otherwise the reader would look up the
- *     alternate's content under CLAUDE.md's identity.
+ *   - LOAD-BEARING. The storage descriptor is DROPPED for the alternates
+ *     (`void 0`). A descriptor names one stored key, and the result's identity
+ *     comes from the FIRST parameter, so reusing the descriptor would hand
+ *     back CLAUDE.md's own bytes labelled with the alternate's path.
+ *   - NOT load-bearing, kept for correctness under future shapes. The third
+ *     parameter is the caller's symlink-resolved twin of the path, and it is
+ *     rewritten to the alternate alongside the first. Traced on 2.1.246: the
+ *     reader passes it to the processor, which uses it only as
+ *     `dirname(thirdParam)` to resolve `@include` targets. Swapping a filename
+ *     inside one directory leaves that dirname identical, so the rewrite is
+ *     inert today. It is NOT the reason the alternates resolve correctly --
+ *     the descriptor drop is -- and an earlier version of this comment said
+ *     otherwise.
  */
 const writeAgentsMdWrapper2233 = (
   file: string,
@@ -135,7 +143,7 @@ const writeAgentsMdWrapper2233 = (
 
   const wrapper =
     `async function ${funcName}(${pathParam},${typeParam},${resolvedParam},${descriptorParam}){` +
-    `let __r=await ${inner}(${pathParam},${typeParam},${resolvedParam},${descriptorParam});` +
+    `let __r=null;try{__r=await ${inner}(${pathParam},${typeParam},${resolvedParam},${descriptorParam})}catch(__e){__r=null}` +
     `if(__r&&__r.info)return __r;` +
     `let __p=String(${pathParam}??"");` +
     `if(!/(^|[\\\\/])CLAUDE\\.md$/.test(__p))return __r;` +
@@ -144,7 +152,7 @@ const writeAgentsMdWrapper2233 = (
     `for(let __n of ${altNamesJson}){` +
     `try{let __x=await ${inner}(__sw(__p,__n),${typeParam},__c?__sw(__c,__n):${resolvedParam},void 0);` +
     `if(__x&&__x.info)return __x}catch{}}` +
-    `return __r}`;
+    `return __r||{info:null,includePaths:[]}}`;
 
   const startIndex = m.index;
   const renamedHead = head.replace(

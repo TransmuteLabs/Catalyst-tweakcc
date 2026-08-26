@@ -6,7 +6,7 @@ import {
   findTextComponent,
   findBoxComponent,
   getReactVar,
-  NO_REACT_NAMESPACE_HINT,
+  reactVarMissReason,
 } from './index';
 import {
   findSlashCommandListEndPosition,
@@ -843,7 +843,7 @@ export const writeToolsetComponentDefinition = (
   const reactVar = getReactVar(oldFile);
   if (!reactVar) {
     console.error(
-      `patch: toolsets: failed to find React variable: ${NO_REACT_NAMESPACE_HINT}`
+      `patch: toolsets: failed to find React variable: ${reactVarMissReason(oldFile)}`
     );
     return null;
   }
@@ -1233,7 +1233,7 @@ export const writeSlashCommandDefinition = (oldFile: string): string | null => {
   const reactVar = getReactVar(oldFile);
   if (!reactVar) {
     console.error(
-      `patch: toolsets: failed to find React variable: ${NO_REACT_NAMESPACE_HINT}`
+      `patch: toolsets: failed to find React variable: ${reactVarMissReason(oldFile)}`
     );
     return null;
   }

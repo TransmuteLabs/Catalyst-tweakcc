@@ -37,7 +37,9 @@ describe('agentsMd', () => {
 
         expect(result).not.toBeNull();
         expect(result).toContain(
-          'async function MEt(e,t,n,r){let __r=await MEt$tw(e,t,n,r);'
+          'async function MEt(e,t,n,r){let __r=null;' +
+            'try{__r=await MEt$tw(e,t,n,r)}catch(__e){__r=null}' +
+            'if(__r&&__r.info)return __r;'
         );
         expect(result).toContain('async function MEt$tw(e,t,n,r){try{');
         // the original body is untouched -- no reroute injected inside it
@@ -75,6 +77,114 @@ describe('agentsMd', () => {
         expect(result).toContain(
           'if(!/(^|[\\\\/])CLAUDE\\.md$/.test(__p))return __r;'
         );
+      });
+
+      // The assertions above are all TEXT shape. A critique pass showed every
+      // one of them survives replacing `for(let __n of [...])` with
+      // `for(let __n of false?[...]:[])` -- the emitted literals are untouched
+      // and the alternates never run. So the wrapper is also EXECUTED here
+      // against a stub reader. These are the tests that redden on that
+      // mutation, and on the initial-read guard being removed.
+      const runWrapper = (
+        inner: (p: string, t: string, r: unknown, d: unknown) => unknown
+      ) => {
+        const patched = writeAgentsMd(reader, altNames)!;
+        const wrapperSrc = patched.slice(
+          0,
+          patched.indexOf('async function MEt$tw(')
+        );
+        const make = new Function('MEt$tw', `${wrapperSrc}\nreturn MEt;`) as (
+          i: unknown
+        ) => (p: string, t: string, r: unknown, d: unknown) => Promise<unknown>;
+        return make(inner);
+      };
+
+      it('returns the CLAUDE.md hit without touching an alternate', async () => {
+        const calls: string[] = [];
+        const fn = runWrapper(p => {
+          calls.push(p);
+          return { info: { path: p }, includePaths: [] };
+        });
+
+        await expect(
+          fn('/x/CLAUDE.md', 'Project', '/real/CLAUDE.md', undefined)
+        ).resolves.toEqual({
+          info: { path: '/x/CLAUDE.md' },
+          includePaths: [],
+        });
+        expect(calls).toEqual(['/x/CLAUDE.md']);
+      });
+
+      it('actually reads the alternates when CLAUDE.md misses', async () => {
+        const calls: Array<[string, unknown, unknown]> = [];
+        const fn = runWrapper((p, _t, r, d) => {
+          calls.push([p, r, d]);
+          return p.endsWith('GEMINI.md')
+            ? { info: { path: p }, includePaths: [] }
+            : { info: null, includePaths: [] };
+        });
+
+        await expect(
+          fn('/x/CLAUDE.md', 'Project', '/real/CLAUDE.md', 'DESCRIPTOR')
+        ).resolves.toEqual({
+          info: { path: '/x/GEMINI.md' },
+          includePaths: [],
+        });
+        expect(calls.map(c => c[0])).toEqual([
+          '/x/CLAUDE.md',
+          '/x/AGENTS.md',
+          '/x/GEMINI.md',
+        ]);
+        // descriptor dropped, resolved twin rewritten -- checked on the CALL,
+        // not on the emitted text
+        expect(calls[1]).toEqual([
+          '/x/AGENTS.md',
+          '/real/AGENTS.md',
+          undefined,
+        ]);
+      });
+
+      it('falls through to the alternates when the initial read throws', async () => {
+        const calls: string[] = [];
+        const fn = runWrapper(p => {
+          calls.push(p);
+          if (p.endsWith('CLAUDE.md')) throw new Error('initial read escaped');
+          return p.endsWith('AGENTS.md')
+            ? { info: { path: p }, includePaths: [] }
+            : { info: null, includePaths: [] };
+        });
+
+        await expect(
+          fn('/x/CLAUDE.md', 'Project', '', undefined)
+        ).resolves.toEqual({
+          info: { path: '/x/AGENTS.md' },
+          includePaths: [],
+        });
+        expect(calls).toEqual(['/x/CLAUDE.md', '/x/AGENTS.md']);
+      });
+
+      it('never reaches an alternate for a non-CLAUDE.md path', async () => {
+        const calls: string[] = [];
+        const fn = runWrapper(p => {
+          calls.push(p);
+          return { info: null, includePaths: [] };
+        });
+
+        await fn('/x/NOTES.md', 'Project', '', undefined);
+        expect(calls).toEqual(['/x/NOTES.md']);
+      });
+
+      it('never resolves to undefined when every read throws', async () => {
+        const fn = runWrapper(() => {
+          throw new Error('everything is on fire');
+        });
+
+        await expect(
+          fn('/x/CLAUDE.md', 'Project', '', undefined)
+        ).resolves.toEqual({
+          info: null,
+          includePaths: [],
+        });
       });
 
       it('offers every configured alternate', () => {
