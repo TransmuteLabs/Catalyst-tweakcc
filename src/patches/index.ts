@@ -835,14 +835,22 @@ export const applyCustomization = async (
       ),
     },
     'input-chevron-color': {
-      fn: c => {
-        const themeColorKey = config.settings.inputBox!.chevronIdleThemeColor!;
-        const theme = config.settings.themes?.[0];
-        const resolved =
-          (theme?.colors as Record<string, string>)?.[themeColorKey] ??
-          themeColorKey;
-        return writeInputChevronColor(c, resolved);
-      },
+      // The configured value is passed through as written. It used to be
+      // resolved against config.settings.themes[0] first, which was wrong
+      // twice over: it baked a literal rgb() into the bundle, so the chevron
+      // stopped following theme switches, and it read whichever theme happened
+      // to sit first in the config rather than the one the user runs.
+      //
+      // Claude Code's Text component takes theme colour NAMES -- its own
+      // chevron code renders color:"bashBorder" for bash mode -- so handing it
+      // "success" keeps the resolution where it belongs, at render time. A
+      // user who configures a raw hex or rgb() string instead gets that
+      // string, which Text also accepts.
+      fn: c =>
+        writeInputChevronColor(
+          c,
+          config.settings.inputBox!.chevronIdleThemeColor!
+        ),
       condition: !!config.settings.inputBox?.chevronIdleThemeColor,
     },
     'subagent-models': {
