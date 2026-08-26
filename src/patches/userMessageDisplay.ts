@@ -1,8 +1,10 @@
 // Please see the note about writing patches in ./index
 import {
+  escapeIdent,
   findBoxComponent,
   findChalkVar,
   findTextComponent,
+  moduleSliceAround,
   showDiff,
 } from './index';
 import { UserMessageDisplayConfig } from '../types';
@@ -123,19 +125,14 @@ export const writeUserMessageDisplay = (
   oldFile: string,
   config: UserMessageDisplayConfig
 ): string | null => {
+  // These three scan the WHOLE joined bundle. That is only ever correct for a
+  // single-module bundle; on a code-split one they are a last-resort fallback
+  // and the names actually used are resolved per-module below. They are not
+  // fatal here for that reason -- a split bundle may legitimately have no
+  // bundle-wide answer while the owning module has a perfectly good one.
   const textComponent = findTextComponent(oldFile);
-  if (!textComponent) {
-    console.error('patch: userMessageDisplay: failed to find Text component');
-    return null;
-  }
-
   const boxComponent = findBoxComponent(oldFile);
-
   const chalkVar = findChalkVar(oldFile);
-  if (!chalkVar) {
-    console.error('patch: userMessageDisplay: failed to find chalk variable');
-    return null;
-  }
 
   // See the older examples above.  We explictly look for and match the component and subcomponent
   // that renders the ">" in older versions so that we can silently drop it in the replacement,
@@ -192,9 +189,57 @@ export const writeUserMessageDisplay = (
     messageVar = match[4];
   }
 
-  const resolvedBoxComponent = localBoxComponent ?? boxComponent;
+  // Every minified name in a code-split bundle is LOCAL TO ITS CHUNK. The three
+  // resolvers above return the first definition anywhere in the joined text,
+  // which from 2.1.242 is almost never in the chunk this edit lands in. On
+  // 2.1.246 that emitted `o(l0,null,...)` into module 1036, whose only `l0` is a
+  // `let` inside an unrelated function: the product parsed, passed every byte
+  // check and printed its version, then died with "l0 is not defined" the moment
+  // it drew the first user message. So the names are taken from CALL SITES
+  // inside the module that owns the match, where whatever that module uses is
+  // correct by construction. On a single-module bundle the slice IS the whole
+  // file, so the older shapes resolve exactly as they did before.
+  const [modStart, modEnd] = moduleSliceAround(oldFile, match.index);
+  const moduleText = oldFile.slice(modStart, modEnd);
+  const calleeSrc = /\.(?:createElement|jsxs?)$/.test(createElementFn)
+    ? `${escapeIdent(
+        createElementFn.replace(/\.(?:createElement|jsxs?)$/, '')
+      )}\\.(?:createElement|jsxs?)`
+    : escapeIdent(createElementFn);
+  const localBox = moduleText.match(
+    new RegExp(`${calleeSrc}\\(([$\\w]+),\\{flexDirection:"column"`)
+  )?.[1];
+  const localText = moduleText.match(
+    new RegExp(`${calleeSrc}\\(([$\\w]+),\\{(?:dimColor|color|wrap):`)
+  )?.[1];
+  const localChalk = findChalkVar(moduleText);
+
+  // On a split bundle a bundle-wide fallback is not a weaker answer, it is a
+  // wrong one: it names a binding from another chunk. Refuse instead.
+  const isSplitBundle = /\n\/\*__tweakcc_module_boundary_\d+__\*\/\n/.test(
+    oldFile
+  );
+  if (isSplitBundle && (!localBox || !localText || !localChalk)) {
+    console.error(
+      'patch: userMessageDisplay: could not resolve Box/Text/chalk inside the ' +
+        'module that owns the match; refusing to emit a name from another chunk'
+    );
+    return null;
+  }
+
+  const resolvedTextComponent = localText ?? textComponent;
+  const resolvedChalkVar = localChalk ?? chalkVar;
+  const resolvedBoxComponent = localBox ?? localBoxComponent ?? boxComponent;
   if (!resolvedBoxComponent) {
     console.error('patch: userMessageDisplay: failed to find Box component');
+    return null;
+  }
+  if (!resolvedTextComponent) {
+    console.error('patch: userMessageDisplay: failed to find Text component');
+    return null;
+  }
+  if (!resolvedChalkVar) {
+    console.error('patch: userMessageDisplay: failed to find chalk variable');
     return null;
   }
 
@@ -244,7 +289,7 @@ export const writeUserMessageDisplay = (
     boxAttrs.length > 0 ? `{${boxAttrs.join(',')}}` : 'null';
 
   // Build chalk chain for custom colors and styling
-  let chalkChain = chalkVar;
+  let chalkChain = resolvedChalkVar;
 
   // Only add color methods for custom (non-default, non-null) colors
   if (config.foregroundColor !== 'default') {
@@ -280,17 +325,24 @@ export const writeUserMessageDisplay = (
   // CC's JSX automatic runtime (jsx/jsxs) passes children as a prop, and the
   // captured call var has no `.createElement`, so emit jsx-convention calls
   // there. Older bundles use the classic createElement(type, props, ...children).
-  const isJsxRuntime = /\.jsxs?$/.test(createElementFn);
+  // The automatic runtime takes (type, props) and reads children OUT of props;
+  // classic createElement takes (type, props, ...children). Testing for a
+  // `.jsx`/`.jsxs` suffix asked the wrong question: from 2.1.242 a chunk imports
+  // the runtime under a plain name, so the callee is a bare `o` -- a jsx runtime
+  // that this test called classic, which then emitted `o(Box,null,child)` and
+  // dropped the child while passing null as the props object. Only an explicit
+  // `.createElement` callee is the classic convention.
+  const isJsxRuntime = !/\.createElement$/.test(createElementFn);
   let elementTree: string;
   if (isJsxRuntime) {
-    const textEl = `${createElementFn}(${textComponent},{children:${chalkFormattedString}})`;
+    const textEl = `${createElementFn}(${resolvedTextComponent},{children:${chalkFormattedString}})`;
     const boxProps =
       boxAttrsObjStr === 'null'
         ? `{children:${textEl}}`
         : `${boxAttrsObjStr.slice(0, -1)},children:${textEl}}`;
     elementTree = `${createElementFn}(${resolvedBoxComponent},${boxProps})`;
   } else {
-    elementTree = `${createElementFn}(${resolvedBoxComponent},${boxAttrsObjStr},${createElementFn}(${textComponent},null,${chalkFormattedString}))`;
+    elementTree = `${createElementFn}(${resolvedBoxComponent},${boxAttrsObjStr},${createElementFn}(${resolvedTextComponent},null,${chalkFormattedString}))`;
   }
 
   const replacement = match[1] + `${replacementPrefix}${elementTree}`;
