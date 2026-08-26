@@ -27,8 +27,13 @@ const FOREIGN_CHUNK =
   'var zz9=r0;zz9.cyan("a");zz9.bold("b");zz9.rgb(1,2,3)("c");zz9.gray("d");';
 
 // The chunk that actually renders a user message on 2.1.242+: the JSX runtime
-// arrives as a plain binding `o`, Box is `a`, Text is `t`, chalk is `ch`.
+// arrives as a plain binding `o`, Box is `a`, Text is `t`, chalk is `ch` -- all
+// of them import aliases, which is what puts them in scope for the whole chunk.
+// `decoy` renders with a FUNCTION-LOCAL `sR`, and it comes first: that is the
+// exact shape that produced "sR is not defined" on 2.1.246.
 const OWNING_CHUNK =
+  'import{Aq as o,Bq as a,Cq as t,Dq as ch}from"/$bunfs/root/_1.js";' +
+  'function decoy(){let sR=t,lR="error";return o(sR,{color:lR,children:"x"})}' +
   'function draw(){' +
   'if(!wE)return(err(Error("No content found in user prompt message")),null);' +
   'const xm=1,km=void 0,_m=0,Pm=void 0;' +
@@ -56,6 +61,14 @@ describe('writeUserMessageDisplay on a code-split bundle', () => {
     expect(injected).toContain('ch(');
   });
 
+  it('skips a call site whose component is function-local', () => {
+    const out = writeUserMessageDisplay(SPLIT_BUNDLE, CONFIG)!;
+    const injected = out.slice(out.indexOf('Zy=o('));
+    // `sR` is the first `o(NAME,{color:...})` in the module and it is a `let`
+    // inside `decoy`; taking it produced "sR is not defined" in the field.
+    expect(injected).not.toContain('sR');
+  });
+
   it('uses the automatic-runtime convention for a bare callee', () => {
     const out = writeUserMessageDisplay(SPLIT_BUNDLE, CONFIG)!;
     // `o` IS the jsx runtime: it takes (type, props) and reads children out of
@@ -71,6 +84,7 @@ describe('writeUserMessageDisplay on a code-split bundle', () => {
     const bare =
       FOREIGN_CHUNK +
       BOUNDARY(1) +
+      'import{Aq as o}from"/$bunfs/root/_1.js";' +
       'function draw(){' +
       'if(!wE)return(err(Error("No content found in user prompt message")),null);' +
       'let Zy;Zy=o(Ff,{text:wE,useBriefLayout:bm,timestamp:Pm});return Zy}';

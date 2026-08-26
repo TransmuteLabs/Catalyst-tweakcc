@@ -4,6 +4,7 @@ import {
   findBoxComponent,
   findChalkVar,
   findTextComponent,
+  moduleScopeBindings,
   moduleSliceAround,
   showDiff,
 } from './index';
@@ -206,13 +207,29 @@ export const writeUserMessageDisplay = (
         createElementFn.replace(/\.(?:createElement|jsxs?)$/, '')
       )}\\.(?:createElement|jsxs?)`
     : escapeIdent(createElementFn);
-  const localBox = moduleText.match(
-    new RegExp(`${calleeSrc}\\(([$\\w]+),\\{flexDirection:"column"`)
-  )?.[1];
-  const localText = moduleText.match(
-    new RegExp(`${calleeSrc}\\(([$\\w]+),\\{(?:dimColor|color|wrap):`)
-  )?.[1];
-  const localChalk = findChalkVar(moduleText);
+
+  // A call site inside the module is still not enough on its own: the name it
+  // uses may be a `let` belonging to that one function. On 2.1.246 the first
+  // `o(NAME,{color:...})` in module 1036 is the tool-error label, whose `sR` is
+  // function-local -- emitting it a few hundred bytes earlier produced an image
+  // that died with "sR is not defined". So candidates are filtered down to what
+  // is in scope for the WHOLE chunk, and the first surviving one wins.
+  const inScope = moduleScopeBindings(moduleText);
+  const pickLocal = (re: RegExp): string | undefined => {
+    for (const hit of moduleText.matchAll(re)) {
+      if (inScope.has(hit[1])) return hit[1];
+    }
+    return undefined;
+  };
+  const localBox = pickLocal(
+    new RegExp(`${calleeSrc}\\(([$\\w]+),\\{flexDirection:"column"`, 'g')
+  );
+  const localText = pickLocal(
+    new RegExp(`${calleeSrc}\\(([$\\w]+),\\{(?:dimColor|color|wrap):`, 'g')
+  );
+  const chalkCandidate = findChalkVar(moduleText);
+  const localChalk =
+    chalkCandidate && inScope.has(chalkCandidate) ? chalkCandidate : undefined;
 
   // On a split bundle a bundle-wide fallback is not a weaker answer, it is a
   // wrong one: it names a binding from another chunk. Refuse instead.

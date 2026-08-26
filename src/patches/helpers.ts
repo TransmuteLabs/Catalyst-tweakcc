@@ -45,6 +45,41 @@ export const escapeNonAscii = (text: string): string => {
   );
 };
 
+/**
+ * The names that are in scope EVERYWHERE inside one code-split chunk.
+ *
+ * A minified name is local to its chunk, and inside a chunk it is local to
+ * whatever function declared it. Picking a component name out of a call site
+ * is therefore not enough: on 2.1.246 the tool-error renderer in module 1036
+ * draws its label with `o(sR,{color:...})`, and `sR` there is a `let` inside
+ * that one function. Emitting it a few hundred bytes earlier produced a live
+ * image that died with "sR is not defined".
+ *
+ * Everything a chunk did not define itself arrives through the import list at
+ * the very top, so an import alias is in scope for the whole chunk by
+ * construction. Ink's Box and Text and the chalk instance always arrive that
+ * way in a rendering chunk, which is what makes this set the right filter for
+ * a name a patch is about to emit.
+ */
+export const moduleScopeBindings = (moduleText: string): Set<string> => {
+  const names = new Set<string>();
+  for (const im of moduleText.matchAll(
+    /import\s*\{([^}]*)\}\s*from\s*"[^"]*"/g
+  )) {
+    for (const part of im[1].split(',')) {
+      const alias = part
+        .split(/\s+as\s+/)
+        .pop()
+        ?.trim();
+      if (alias) names.add(alias);
+    }
+  }
+  for (const im of moduleText.matchAll(/import\s+([$\w]+)\s+from\s*"[^"]*"/g)) {
+    names.add(im[1]);
+  }
+  return names;
+};
+
 export const findChalkVar = (fileContents: string): string | undefined => {
   // Find chalk variable using the counting method
   const chalkPattern =
