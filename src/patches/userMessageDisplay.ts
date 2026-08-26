@@ -1,10 +1,9 @@
 // Please see the note about writing patches in ./index
 import {
-  escapeIdent,
   findBoxComponent,
   findChalkVar,
   findTextComponent,
-  moduleScopeBindings,
+  moduleImportBindings,
   moduleSliceAround,
   showDiff,
 } from './index';
@@ -174,8 +173,6 @@ export const writeUserMessageDisplay = (
   let createElementFn: string;
   let messageVar: string;
 
-  let localBoxComponent: string | undefined;
-
   if (oldMatch) {
     // Old pattern matches
     createElementFn = match[4];
@@ -202,11 +199,19 @@ export const writeUserMessageDisplay = (
   // file, so the older shapes resolve exactly as they did before.
   const [modStart, modEnd] = moduleSliceAround(oldFile, match.index);
   const moduleText = oldFile.slice(modStart, modEnd);
-  const calleeSrc = /\.(?:createElement|jsxs?)$/.test(createElementFn)
-    ? `${escapeIdent(
+  // escapeIdent only escapes `$`, so a namespaced callee like `A.default` put a
+  // bare `.` into the pattern -- a wildcard. And without a left boundary the
+  // bare-callee form matches INSIDE a longer name: `Go(W,{flexDirection:...` is
+  // a hit on the `o` of `Go`, capturing `W`, and if `W` happens to be imported
+  // the patch emits the wrong component with no error at runtime at all. That
+  // one renders, so the interface gate would pass it.
+  const rxEsc = (t: string) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const calleeBody = /\.(?:createElement|jsxs?)$/.test(createElementFn)
+    ? `${rxEsc(
         createElementFn.replace(/\.(?:createElement|jsxs?)$/, '')
       )}\\.(?:createElement|jsxs?)`
-    : escapeIdent(createElementFn);
+    : rxEsc(createElementFn);
+  const calleeSrc = `(?<![$\\w.])${calleeBody}`;
 
   // A call site inside the module is still not enough on its own: the name it
   // uses may be a `let` belonging to that one function. On 2.1.246 the first
@@ -214,7 +219,7 @@ export const writeUserMessageDisplay = (
   // function-local -- emitting it a few hundred bytes earlier produced an image
   // that died with "sR is not defined". So candidates are filtered down to what
   // is in scope for the WHOLE chunk, and the first surviving one wins.
-  const inScope = moduleScopeBindings(moduleText);
+  const inScope = moduleImportBindings(moduleText);
   const pickLocal = (re: RegExp): string | undefined => {
     for (const hit of moduleText.matchAll(re)) {
       if (inScope.has(hit[1])) return hit[1];
@@ -246,7 +251,7 @@ export const writeUserMessageDisplay = (
 
   const resolvedTextComponent = localText ?? textComponent;
   const resolvedChalkVar = localChalk ?? chalkVar;
-  const resolvedBoxComponent = localBox ?? localBoxComponent ?? boxComponent;
+  const resolvedBoxComponent = localBox ?? boxComponent;
   if (!resolvedBoxComponent) {
     console.error('patch: userMessageDisplay: failed to find Box component');
     return null;

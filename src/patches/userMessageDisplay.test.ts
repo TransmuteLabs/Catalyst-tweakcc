@@ -109,3 +109,59 @@ describe('writeUserMessageDisplay on a single-module bundle', () => {
     expect(out!).not.toContain('{children:ch(');
   });
 });
+
+describe('name resolution cannot be poisoned or mis-anchored', () => {
+  const withOwning = (owning: string) => FOREIGN_CHUNK + BOUNDARY(1) + owning;
+
+  it('ignores an import-looking string literal outside the prologue', () => {
+    // The literal is DATA. Reading it as a binding is how a name that exists
+    // nowhere gets emitted -- the very class this filter exists to stop.
+    const owning =
+      'import{Aq as o,Bq as a,Cq as t,Dq as ch}from"/$bunfs/root/_1.js";' +
+      'var doc=`import{jsx as Qz}from"react"`;' +
+      'function decoy(){return o(Qz,{color:"red",children:doc})}' +
+      'function draw(){' +
+      'if(!wE)return(err(Error("No content found in user prompt message")),null);' +
+      'let Zy;Zy=o(Ff,{text:wE,useBriefLayout:bm,timestamp:Pm});' +
+      'let zz=o(a,{flexDirection:"column",children:Zy});' +
+      'let hint=o(t,{dimColor:!0,children:"hint"});ch.bold("x");return zz}';
+    const out = writeUserMessageDisplay(withOwning(owning), CONFIG)!;
+    const injected = out.slice(out.indexOf('Zy=o('));
+    expect(injected).not.toContain('Qz');
+    expect(injected).toContain('o(t,');
+  });
+
+  it('accepts namespace and default import forms', () => {
+    const owning =
+      'import * as t from"/$bunfs/root/_2.js";' +
+      'import ch,{Aq as o,Bq as a}from"/$bunfs/root/_1.js";' +
+      'function draw(){' +
+      'if(!wE)return(err(Error("No content found in user prompt message")),null);' +
+      'let Zy;Zy=o(Ff,{text:wE,useBriefLayout:bm,timestamp:Pm});' +
+      'let zz=o(a,{flexDirection:"column",children:Zy});' +
+      'let hint=o(t,{dimColor:!0,children:"hint"});ch.bold("x");return zz}';
+    const out = writeUserMessageDisplay(withOwning(owning), CONFIG);
+    expect(out).not.toBeNull();
+    const injected = out!.slice(out!.indexOf('Zy=o('));
+    expect(injected).toContain('o(a,');
+    expect(injected).toContain('o(t,');
+  });
+
+  it('does not match the callee inside a longer identifier', () => {
+    // `Go(` contains `o(`. Without a left boundary the first "Box" hit is the
+    // argument of Go, and a wrong-but-imported name renders fine -- no crash,
+    // so the interface gate would pass it too.
+    const owning =
+      'import{Aq as o,Bq as a,Cq as t,Dq as ch,Eq as W,Fq as Go}from"/$bunfs/root/_1.js";' +
+      'function early(){return Go(W,{flexDirection:"column",children:null})}' +
+      'function draw(){' +
+      'if(!wE)return(err(Error("No content found in user prompt message")),null);' +
+      'let Zy;Zy=o(Ff,{text:wE,useBriefLayout:bm,timestamp:Pm});' +
+      'let zz=o(a,{flexDirection:"column",children:Zy});' +
+      'let hint=o(t,{dimColor:!0,children:"hint"});ch.bold("x");return zz}';
+    const out = writeUserMessageDisplay(withOwning(owning), CONFIG)!;
+    const injected = out.slice(out.indexOf('Zy=o('));
+    expect(injected).toContain('o(a,');
+    expect(injected).not.toContain('o(W,');
+  });
+});

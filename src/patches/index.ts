@@ -108,7 +108,7 @@ export {
   findTextComponent,
   findBoxComponent,
   moduleSliceAround,
-  moduleScopeBindings,
+  moduleImportBindings,
 } from './helpers';
 
 export interface LocationResult {

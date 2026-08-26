@@ -46,36 +46,65 @@ export const escapeNonAscii = (text: string): string => {
 };
 
 /**
- * The names that are in scope EVERYWHERE inside one code-split chunk.
+ * The names a code-split chunk imports, and therefore has in scope throughout.
  *
  * A minified name is local to its chunk, and inside a chunk it is local to
- * whatever function declared it. Picking a component name out of a call site
- * is therefore not enough: on 2.1.246 the tool-error renderer in module 1036
- * draws its label with `o(sR,{color:...})`, and `sR` there is a `let` inside
- * that one function. Emitting it a few hundred bytes earlier produced a live
- * image that died with "sR is not defined".
+ * whatever function declared it. Picking a component name out of a call site is
+ * therefore not enough: on 2.1.246 the tool-error renderer in module 1036 draws
+ * its label with `o(sR,{color:...})`, and `sR` there is a `let` inside that one
+ * function. Emitting it a few hundred bytes earlier produced a live image that
+ * died with "sR is not defined".
  *
- * Everything a chunk did not define itself arrives through the import list at
- * the very top, so an import alias is in scope for the whole chunk by
- * construction. Ink's Box and Text and the chalk instance always arrive that
- * way in a rendering chunk, which is what makes this set the right filter for
- * a name a patch is about to emit.
+ * Only the import PROLOGUE is read -- the leading run of import statements
+ * before the first other token. Scanning the whole module text instead lets a
+ * string literal that merely looks like an import register a binding that does
+ * not exist: a chunk containing `` `import{jsx as Qz}from"react"` `` as DATA
+ * would put `Qz` in scope and hand the caller a name that crashes on use, which
+ * is the exact class this set exists to prevent.
+ *
+ * The name says imports, not "module scope", because that is what it returns: a
+ * top-level `var`/`function` in the chunk is equally in scope and is NOT here.
+ * Callers that refuse when a name is missing are refusing on "not imported".
  */
-export const moduleScopeBindings = (moduleText: string): Set<string> => {
+export const moduleImportBindings = (moduleText: string): Set<string> => {
   const names = new Set<string>();
-  for (const im of moduleText.matchAll(
-    /import\s*\{([^}]*)\}\s*from\s*"[^"]*"/g
-  )) {
-    for (const part of im[1].split(',')) {
-      const alias = part
-        .split(/\s+as\s+/)
-        .pop()
-        ?.trim();
-      if (alias) names.add(alias);
+  const SKIP = /^(?:\s+|\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)+/;
+  // `import ... from "spec"`, `import "spec"`, with or without a clause.
+  const IMPORT = /^import\s*(?:[^"';]*?\s*from\s*)?["'][^"']*["']\s*;?/;
+  let pos = 0;
+  for (;;) {
+    const skip = moduleText.slice(pos).match(SKIP);
+    if (skip) {
+      pos += skip[0].length;
+      continue;
     }
-  }
-  for (const im of moduleText.matchAll(/import\s+([$\w]+)\s+from\s*"[^"]*"/g)) {
-    names.add(im[1]);
+    const stmt = moduleText.slice(pos).match(IMPORT);
+    if (!stmt) break;
+    pos += stmt[0].length;
+
+    const clause = stmt[0]
+      .replace(/^import\s*/, '')
+      .replace(/\s*from[\s\S]*$/, '');
+    // `import * as NS`
+    const ns = clause.match(/^\*\s*as\s+([$\w]+)/);
+    if (ns) {
+      names.add(ns[1]);
+      continue;
+    }
+    // A default binding, alone or ahead of a named list: `import D`, `import D,{...}`
+    const def = clause.match(/^([$\w]+)\s*(?:,|$)/);
+    if (def) names.add(def[1]);
+    // The named list, whether or not a default came first.
+    const named = clause.match(/\{([^}]*)\}/);
+    if (named) {
+      for (const part of named[1].split(',')) {
+        const alias = part
+          .split(/\s+as\s+/)
+          .pop()
+          ?.trim();
+        if (alias) names.add(alias);
+      }
+    }
   }
   return names;
 };
