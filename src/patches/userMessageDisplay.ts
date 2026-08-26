@@ -1,7 +1,6 @@
 // Please see the note about writing patches in ./index
 import {
   findBoxComponent,
-  findChalkVar,
   findTextComponent,
   moduleImportBindings,
   moduleSliceAround,
@@ -133,7 +132,6 @@ export const writeUserMessageDisplay = (
   // bundle-wide answer while the owning module has a perfectly good one.
   const textComponent = findTextComponent(oldFile);
   const boxComponent = findBoxComponent(oldFile);
-  const chalkVar = findChalkVar(oldFile);
 
   // See the older examples above.  We explictly look for and match the component and subcomponent
   // that renders the ">" in older versions so that we can silently drop it in the replacement,
@@ -233,23 +231,18 @@ export const writeUserMessageDisplay = (
   const localText = pickLocal(
     new RegExp(`${calleeSrc}\\(([$\\w]+),\\{(?:dimColor|color|wrap):`, 'g')
   );
-  const chalkCandidate = findChalkVar(moduleText);
-  const localChalk =
-    chalkCandidate && inScope.has(chalkCandidate) ? chalkCandidate : undefined;
-
   // On a split bundle a bundle-wide fallback is not a weaker answer, it is a
   // wrong one: it names a binding from another chunk. Refuse instead.
   const isSplitBundle = MODULE_BOUNDARY_SPLIT_RE.test(oldFile);
-  if (isSplitBundle && (!localBox || !localText || !localChalk)) {
+  if (isSplitBundle && (!localBox || !localText)) {
     console.error(
-      'patch: userMessageDisplay: could not resolve Box/Text/chalk inside the ' +
+      'patch: userMessageDisplay: could not resolve Box/Text inside the ' +
         'module that owns the match; refusing to emit a name from another chunk'
     );
     return null;
   }
 
   const resolvedTextComponent = localText ?? textComponent;
-  const resolvedChalkVar = localChalk ?? chalkVar;
   const resolvedBoxComponent = localBox ?? boxComponent;
   if (!resolvedBoxComponent) {
     console.error('patch: userMessageDisplay: failed to find Box component');
@@ -259,11 +252,6 @@ export const writeUserMessageDisplay = (
     console.error('patch: userMessageDisplay: failed to find Text component');
     return null;
   }
-  if (!resolvedChalkVar) {
-    console.error('patch: userMessageDisplay: failed to find chalk variable');
-    return null;
-  }
-
   // Build box attributes (border and padding)
   const boxAttrs: string[] = [];
   const isCustomBorder = config.borderStyle.startsWith('topBottom');
@@ -309,38 +297,62 @@ export const writeUserMessageDisplay = (
   const boxAttrsObjStr =
     boxAttrs.length > 0 ? `{${boxAttrs.join(',')}}` : 'null';
 
-  // Build chalk chain for custom colors and styling
-  let chalkChain = resolvedChalkVar;
+  // Style through the Text element's own props, not a chalk chain.
+  //
+  // The styled string used to be built as `chalk.rgb(r,g,b).bold(`...`)`, which
+  // needed a chalk binding resolved INSIDE the chunk that owns the match. From
+  // 2.1.242 the bundle is split into ~1400 chunks and the chunk holding the user
+  // message has no chalk import, so the resolution failed and the whole patch
+  // refused -- userMessageDisplay was the one patch dead on 2.1.242/243/245.
+  //
+  // Every effect this feature offers is a prop on ink's Text: color,
+  // backgroundColor, bold, italic, underline, strikethrough, inverse. Emitting
+  // props needs no extra binding at all, so the patch no longer depends on what
+  // a given chunk happens to import. Colours are converted to hex because that
+  // form is accepted regardless of how the terminal's colour support is probed.
+  const toHex = (rgb: string): string | undefined => {
+    const parts = rgb.match(/\d+/g);
+    if (!parts || parts.length < 3) return undefined;
+    return (
+      '#' +
+      parts
+        .slice(0, 3)
+        .map((n) => Math.min(255, Number(n)).toString(16).padStart(2, '0'))
+        .join('')
+    );
+  };
 
-  // Only add color methods for custom (non-default, non-null) colors
+  const textProps: string[] = [];
+
   if (config.foregroundColor !== 'default') {
-    const fgMatch = config.foregroundColor.match(/\d+/g);
-    if (fgMatch) {
-      chalkChain += `.rgb(${fgMatch.join(',')})`;
-    }
+    const fg = toHex(config.foregroundColor);
+    if (fg) textProps.push(`color:${JSON.stringify(fg)}`);
   }
 
   if (config.backgroundColor !== 'default' && config.backgroundColor !== null) {
-    const bgMatch = config.backgroundColor.match(/\d+/g);
-    if (bgMatch) {
-      chalkChain += `.bgRgb(${bgMatch.join(',')})`;
-    }
+    const bg = toHex(config.backgroundColor);
+    if (bg) textProps.push(`backgroundColor:${JSON.stringify(bg)}`);
   }
 
-  // Apply styling
-  if (config.styling.includes('bold')) chalkChain += '.bold';
-  if (config.styling.includes('italic')) chalkChain += '.italic';
-  if (config.styling.includes('underline')) chalkChain += '.underline';
-  if (config.styling.includes('strikethrough')) chalkChain += '.strikethrough';
-  if (config.styling.includes('inverse')) chalkChain += '.inverse';
+  for (const style of [
+    'bold',
+    'italic',
+    'underline',
+    'strikethrough',
+    'inverse',
+  ] as const) {
+    if (config.styling.includes(style)) textProps.push(`${style}:!0`);
+  }
 
   // Replace {} in format string with the message variable
   const formattedMessage =
     '`' + config.format.replace(/\{\}/g, '${' + messageVar + '}') + '`';
 
-  const chalkFormattedString = `${chalkChain}(${formattedMessage})`;
+  const textPropsPrefix = textProps.length > 0 ? `${textProps.join(',')},` : '';
+  const textPropsObjStr =
+    textProps.length > 0 ? `{${textProps.join(',')}}` : 'null';
 
-  // Build replacement: Box(border/padding) wrapping Text(chalk-formatted message).
+  // Build replacement: Box(border/padding) wrapping a styled Text.
   const replacementPrefix = memoizedChildMatch ? `${match[2]}=` : '';
 
   // CC's JSX automatic runtime (jsx/jsxs) passes children as a prop, and the
@@ -356,14 +368,14 @@ export const writeUserMessageDisplay = (
   const isJsxRuntime = !/\.createElement$/.test(createElementFn);
   let elementTree: string;
   if (isJsxRuntime) {
-    const textEl = `${createElementFn}(${resolvedTextComponent},{children:${chalkFormattedString}})`;
+    const textEl = `${createElementFn}(${resolvedTextComponent},{${textPropsPrefix}children:${formattedMessage}})`;
     const boxProps =
       boxAttrsObjStr === 'null'
         ? `{children:${textEl}}`
         : `${boxAttrsObjStr.slice(0, -1)},children:${textEl}}`;
     elementTree = `${createElementFn}(${resolvedBoxComponent},${boxProps})`;
   } else {
-    elementTree = `${createElementFn}(${resolvedBoxComponent},${boxAttrsObjStr},${createElementFn}(${resolvedTextComponent},null,${chalkFormattedString}))`;
+    elementTree = `${createElementFn}(${resolvedBoxComponent},${boxAttrsObjStr},${createElementFn}(${resolvedTextComponent},${textPropsObjStr},${formattedMessage}))`;
   }
 
   const replacement = match[1] + `${replacementPrefix}${elementTree}`;

@@ -15,6 +15,8 @@ const CONFIG: UserMessageDisplayConfig = {
   fitBoxToContent: false,
 };
 
+const BT = '`';
+
 const BOUNDARY = (n: number) => `\n/*__tweakcc_module_boundary_${n}__*/\n`;
 
 // A foreign chunk that DEFINES the shapes the bundle-wide resolvers look for.
@@ -58,7 +60,12 @@ describe('writeUserMessageDisplay on a code-split bundle', () => {
     expect(injected).not.toContain('zz9');
     expect(injected).toContain('o(a,');
     expect(injected).toContain('o(t,');
-    expect(injected).toContain('ch(');
+    // `ch` IS in scope in this chunk, and the old emission wrapped the message
+    // in it. Styling rides on Text's own props now, so no chalk binding is
+    // referenced at all -- which is what makes the patch work on chunks that
+    // import no chalk (2.1.242/243/245).
+    expect(injected).not.toContain('ch(');
+    expect(injected).toContain('children:' + BT);
   });
 
   it('skips a call site whose component is function-local', () => {
@@ -74,9 +81,35 @@ describe('writeUserMessageDisplay on a code-split bundle', () => {
     // `o` IS the jsx runtime: it takes (type, props) and reads children out of
     // props. The classic 3-argument form would pass null as props and silently
     // drop the message text.
-    expect(out).toContain('children:o(t,{children:ch(');
+    expect(out).toContain('children:o(t,{children:' + BT);
     expect(out).not.toContain('o(t,null,');
     expect(out).not.toContain(',null,o(');
+  });
+
+  it('emits styling as Text props, not as a chalk chain', () => {
+    const styled = writeUserMessageDisplay(SPLIT_BUNDLE, {
+      ...CONFIG,
+      styling: ['bold', 'underline'],
+      foregroundColor: 'rgb(255,128,0)',
+      backgroundColor: 'rgb(0,0,16)',
+    })!;
+    // Scope to the emitted element tree. The chunk's own `ch.bold(...)` lines
+    // live further down and are untouched by design, so an unscoped negative
+    // would be asserting about text this patch never wrote.
+    const from = styled.indexOf('Zy=o(');
+    const injected = styled.slice(from, styled.indexOf(',Mm[17]', from));
+    expect(injected).toContain('color:"#ff8000"');
+    expect(injected).toContain('backgroundColor:"#000010"');
+    expect(injected).toContain('bold:!0');
+    expect(injected).toContain('underline:!0');
+    // Styles the config did NOT ask for must not appear.
+    expect(injected).not.toContain('italic:!0');
+    expect(injected).not.toContain('strikethrough:!0');
+    expect(injected).not.toContain('inverse:!0');
+    // and no chalk chain survives anywhere in the emission
+    expect(injected).not.toContain('ch.');
+    expect(injected).not.toContain('.rgb(');
+    expect(injected).not.toContain('.bgRgb(');
   });
 
   it('refuses rather than emitting a name from another chunk', () => {
@@ -106,7 +139,11 @@ describe('writeUserMessageDisplay on a single-module bundle', () => {
     expect(out).not.toBeNull();
     expect(out!).toContain('.createElement(');
     // Classic form: children are positional, never a `children:` prop.
-    expect(out!).not.toContain('{children:ch(');
+    // Scoped to the rewritten function: `bx0`'s own destructuring parameter in
+    // the fixture spells `{children:` and is not ours.
+    const emitted = out!.slice(out!.indexOf('function draw()'));
+    expect(emitted).not.toContain('{children:');
+    expect(emitted).toContain('.createElement(Tx0,null,' + BT);
   });
 });
 
