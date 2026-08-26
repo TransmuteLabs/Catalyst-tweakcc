@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { writeSessionMemory } from './sessionMemory';
 
@@ -16,7 +16,7 @@ describe('writeSessionMemory', () => {
       // new extraction path: anchor + passport_quail gate that patchExtraction strips
       'D8({querySource:"extract_memories",forkLabel:"extract_memories"});' +
       'if(!Qz("tengu_passport_quail",!1))return;' +
-      // extract-mode gate, force-enabled to {return!0} (present in real 2.1.217)
+      // extract-mode gate: the flag guard is dropped, the interactivity term stays
       'function JXn(){if(!Ke("tengu_passport_quail",!1))return!1;return!un()||Ke("tengu_slate_thimble",!1)}' +
       // past-sessions fallback anchor (coral_fern gate already removed upstream)
       'if(Wf("tengu_session_search_toggled",!1)){}';
@@ -25,9 +25,33 @@ describe('writeSessionMemory', () => {
 
     // Core feature must still apply, and both force-enable rewrites must run:
     expect(result).not.toBeNull();
-    expect(result).toContain('function JXn(){return!0}');
+    // The flag gate is forced on...
     expect(result).not.toContain('tengu_passport_quail');
-    expect(result).not.toContain('tengu_slate_thimble');
+    // ...but `!un()` -- the product's own "this session is interactive" test --
+    // and its escape hatch survive verbatim. Rewriting the body to `return!0`
+    // turned session memory on for print mode, background agents and SDK
+    // sessions, which this feature never promised.
+    expect(result).toContain(
+      'function JXn(){return!un()||Ke("tengu_slate_thimble",!1)}'
+    );
+    expect(result).not.toContain('function JXn(){return!0}');
+  });
+
+  it('reports a reshaped extract-mode gate instead of silently not forcing it', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const input =
+      'D8({querySource:"extract_memories",forkLabel:"extract_memories"});' +
+      'if(!Qz("tengu_passport_quail",!1))return;' +
+      // same flag, a shape this patch does not know
+      'function JXn(){return Ke("tengu_passport_quail",!1)&&somethingElse()}' +
+      'if(Wf("tengu_session_search_toggled",!1)){}';
+
+    writeSessionMemory(input);
+
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('extract-mode gate is present but reshaped')
+    );
+    errSpy.mockRestore();
   });
 
   it('does not treat a telemetry event wrapped in a returning function as the legacy extraction gate', () => {

@@ -268,11 +268,33 @@ export const writeSessionMemory = (oldFile: string): string | null => {
   }
   newFile = withPastSessions;
 
+  // Force the feature flag, keep the product's own interactivity condition.
+  //
+  // On 2.1.246 (chunk 133) the gate is
+  //
+  //   function _Z(){if(!D("tengu_passport_quail",!1))return!1;
+  //                 return!ge()||D("tengu_slate_thimble",!1)}
+  //
+  // and `ge` resolves through the chunk 812 re-export `Rd as jmd` to chunk 28:
+  //
+  //   function Rd(){return!n().host.launchOptions.isInteractive()}
+  //
+  // so `!ge()` is "this session is interactive" and `tengu_slate_thimble` is the
+  // product's own escape hatch for running anyway. Rewriting the whole body to
+  // `return!0` forced extraction in NON-interactive sessions too -- print mode,
+  // background agents, SDK sessions -- which is a behaviour change this feature
+  // never promised and which costs a model call per extraction cycle in exactly
+  // the contexts that run unattended.
+  //
+  // Only the flag gate is removed. The returned expression is carried over
+  // verbatim from the match rather than re-spelled, so the minified names of the
+  // interactivity helper and the escape-hatch flag reader cannot drift out from
+  // under us.
   const extractModePattern =
-    /(function [$\w]+\(\))\{if\(![$\w]+\("tengu_passport_quail",!1\)\)return!1;return![$\w]+\(\)\|\|[$\w]+\("tengu_slate_thimble",!1\)\}/;
+    /(function [$\w]+\(\))\{if\(![$\w]+\("tengu_passport_quail",!1\)\)return!1;(return![$\w]+\(\)\|\|[$\w]+\("tengu_slate_thimble",!1\))\}/;
   const extractModeMatch = newFile.match(extractModePattern);
   if (extractModeMatch && extractModeMatch.index !== undefined) {
-    const replacement = `${extractModeMatch[1]}{return!0}`;
+    const replacement = `${extractModeMatch[1]}{${extractModeMatch[2]}}`;
     const beforePatch = newFile;
     newFile =
       newFile.slice(0, extractModeMatch.index) +
@@ -284,6 +306,14 @@ export const writeSessionMemory = (oldFile: string): string | null => {
       replacement,
       extractModeMatch.index,
       extractModeMatch.index + extractModeMatch[0].length
+    );
+  } else if (!usedLegacyExtraction && newFile.includes('"tengu_passport_quail"')) {
+    // The build still carries the flag but no longer wears this shape: the
+    // force-on would silently not happen. Legacy builds have no such function at
+    // all, so they are exempt rather than noisy.
+    console.error(
+      'patch: sessionMemory: the extract-mode gate is present but reshaped; ' +
+        'session memory may stay off despite this patch reporting success'
     );
   }
 
