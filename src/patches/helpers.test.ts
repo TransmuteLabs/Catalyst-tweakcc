@@ -79,6 +79,33 @@ describe('React module resolution', () => {
     it('returns undefined when React is absent', () => {
       expect(getReactVar(LOADER + 'var a=1;')).toBeUndefined();
     });
+
+    it('answers per bundle, not out of the previous bundle cache', () => {
+      // No clearReactVarCache() between the two: the lib surface hands this
+      // function a different bundle per call, and an unkeyed cache used to
+      // answer for the first one forever.
+      expect(getReactVar(ARROW_BUNDLE)).toBe('qwd');
+      expect(getReactVar(FN_EXPR_BUNDLE)).toBe('G8c');
+      expect(getReactVar(ARROW_BUNDLE)).toBe('qwd');
+    });
+
+    it('says nothing on a code-split bundle', () => {
+      // Variable resolution is eager, so a line printed here would read as a
+      // failure on runs where no patch needed React at all.
+      const said: unknown[][] = [];
+      const realLog = console.log;
+      const realError = console.error;
+      console.log = (...a: unknown[]) => void said.push(a);
+      console.error = (...a: unknown[]) => void said.push(a);
+      try {
+        const split = 'var a=1\n/*__tweakcc_module_boundary_1__*/\nvar b=2';
+        expect(getReactVar(split)).toBeUndefined();
+      } finally {
+        console.log = realLog;
+        console.error = realError;
+      }
+      expect(said).toEqual([]);
+    });
   });
 });
 

@@ -167,8 +167,21 @@ export const getReactModuleFunctionBun = (
   return match[1];
 };
 
-// Cache for React variable to avoid recomputing
+/**
+ * Why getReactVar returns nothing on a code-split bundle. Attached by the
+ * callers that cannot proceed without a React namespace, so the explanation
+ * appears exactly where it is actionable.
+ */
+export const NO_REACT_NAMESPACE_HINT =
+  'this bundle is code-split and renders through the JSX runtime, so there is ' +
+  'no React namespace to resolve; a patch that needs to emit elements must use ' +
+  "the injection chunk's own runtime binding";
+
+// Cache for React variable to avoid recomputing. Keyed on the bundle it was
+// computed from: the lib surface hands this function a different bundle per
+// call, and an unkeyed cache would answer for the first one forever.
 let reactVarCache: string | undefined | null = null;
+let reactVarCacheKey: string | null = null;
 
 // Cache for require function name to avoid recomputing
 let requireFuncNameCache: string | null = null;
@@ -178,35 +191,32 @@ let requireFuncNameCache: string | null = null;
  */
 export const getReactVar = (fileContents: string): string | undefined => {
   // Return cached value if available
-  if (reactVarCache != null) {
+  if (reactVarCacheKey === fileContents && reactVarCache != null) {
     return reactVarCache;
+  }
+  reactVarCacheKey = fileContents;
+
+  // A code-split bundle (CC >=2.1.242) has no React namespace to find, and this
+  // is checked FIRST because every message below it would name a cause that is
+  // not the cause. Every chunk renders through the JSX automatic runtime,
+  // imported under a chunk-local name; `createElement` survives in the bundle
+  // only as `document.createElement` from vendored web code. Measured on
+  // 2.1.246: zero occurrences of the interop this function looks for, and no
+  // React handle any injected code could reach.
+  //
+  // Returned silently. Variable resolution is EAGER -- commands.ts resolves
+  // this for every run whether or not a patch will read it -- so a line printed
+  // here reads as a failure on a run where nothing needed React at all. The two
+  // callers that genuinely cannot proceed without it say so themselves, with
+  // NO_REACT_NAMESPACE_HINT for the reason.
+  if (/\n\/\*__tweakcc_module_boundary_\d+__\*\/\n/.test(fileContents)) {
+    reactVarCache = undefined;
+    return undefined;
   }
 
   const moduleLoader = getModuleLoaderFunction(fileContents);
   if (!moduleLoader) {
     console.log('^ patch: getReactVar: failed to find moduleLoader');
-    reactVarCache = undefined;
-    return undefined;
-  }
-
-  // A code-split bundle (CC >=2.1.242) has no React namespace to find, and
-  // saying "failed to find reactModuleVarNonBun" would name a cause that is not
-  // the cause. Every chunk renders through the JSX automatic runtime, imported
-  // under a chunk-local name; `createElement` survives in the bundle only as
-  // `document.createElement` from vendored web code. Measured on 2.1.246: zero
-  // occurrences of the interop this function looks for, and no React handle any
-  // injected code could reach.
-  //
-  // So the diagnosis is reported for what it is. A caller that needs to emit
-  // elements into such a bundle cannot be handed one global name: it has to
-  // find the runtime binding of the chunk it is injecting into, and emit
-  // runtime calls rather than createElement.
-  if (/\n\/\*__tweakcc_module_boundary_\d+__\*\/\n/.test(fileContents)) {
-    console.log(
-      'patch: getReactVar: this bundle is code-split and renders through the JSX ' +
-        'runtime, so there is no React namespace to resolve; a patch that needs to ' +
-        "emit elements must use the injection chunk's own runtime binding"
-    );
     reactVarCache = undefined;
     return undefined;
   }
@@ -261,6 +271,7 @@ export const getReactVar = (fileContents: string): string | undefined => {
  */
 export const clearReactVarCache = (): void => {
   reactVarCache = null;
+  reactVarCacheKey = null;
 };
 
 /**
