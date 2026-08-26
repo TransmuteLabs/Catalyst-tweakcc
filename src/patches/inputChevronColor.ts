@@ -6,7 +6,12 @@ export const writeInputChevronColor = (
   resolvedColor: string
 ): string | null => {
   const pattern =
-    /,\{isLoading:([$\w]+),(?:[$\w]+:[$\w]+,)*themeColor:([$\w]+)\}=[$\w]+,([$\w]+)=\2\?\?void 0[,;][\s\S]*?if\([^)]*!==\3[^)]*\|\|[^)]*!==\1[^)]*\)[$\w]+=[$\w]+\.jsxs?\([$\w]+,\{color:\3,dimColor:\1,children:/;
+    // The chevron element is emitted through whatever JSX call form the bundle
+    // uses. Up to 2.1.244 that was a React namespace -- `X.jsx(Text, {...})`.
+    // From 2.1.245 the chunk imports the runtime as a plain binding, so the
+    // same call reads `i(Text, {...})`. Both forms are accepted; nothing else
+    // about this site changed across that boundary.
+    /,\{isLoading:([$\w]+),(?:[$\w]+:[$\w]+,)*themeColor:([$\w]+)\}=[$\w]+,([$\w]+)=\2\?\?void 0[,;][\s\S]*?if\([^)]*!==\3[^)]*\|\|[^)]*!==\1[^)]*\)[$\w]+=(?:[$\w]+\.jsxs?|[$\w]+)\([$\w]+,\{color:\3,dimColor:\1,children:/;
 
   const match = file.match(pattern);
 

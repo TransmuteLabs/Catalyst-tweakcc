@@ -19,6 +19,71 @@ const altNames = ['AGENTS.md', 'GEMINI.md', 'QWEN.md'];
 
 describe('agentsMd', () => {
   describe('writeAgentsMd', () => {
+    describe('CC >=2.1.233 (storage descriptor, wrapper strategy)', () => {
+      // Verbatim from 2.1.246, identifiers preserved.
+      const reader =
+        'async function MEt(e,t,n,r){try{let o,s=!1;' +
+        'if(r){let i=await mYo(r);switch(i.kind){' +
+        'case"absent":return{info:null,includePaths:[]};' +
+        'case"error":return JKn(i.code,e),{info:null,includePaths:[]};' +
+        'case"skipped":s=i.isDirectory,o=null;break;' +
+        'case"content":o=i.content;break}}' +
+        'else{let i=yt();o=await Kg(i,e,Qze,(a)=>{s=a.isDirectory()})}' +
+        'if(o===null){b(`skip`);return{info:null,includePaths:[]}}' +
+        'return VKn(o,e,t,n)}catch(o){return fYo(o,e),{info:null,includePaths:[]}}}';
+
+      it('wraps the reader instead of editing its catch', () => {
+        const result = writeAgentsMd(reader, altNames)!;
+
+        expect(result).not.toBeNull();
+        expect(result).toContain(
+          'async function MEt(e,t,n,r){let __r=await MEt$tw(e,t,n,r);'
+        );
+        expect(result).toContain('async function MEt$tw(e,t,n,r){try{');
+        // the original body is untouched -- no reroute injected inside it
+        expect(result).not.toContain('didReroute');
+        expect(
+          result.match(/case"absent":return\{info:null,includePaths:\[\]\}/g)
+        ).toHaveLength(1);
+      });
+
+      it('covers the descriptor exit, not just the throw', () => {
+        const result = writeAgentsMd(reader, altNames)!;
+
+        // The wrapper keys off the RESULT, so `case"absent"` (a plain return,
+        // never thrown) reaches the alternates like any other miss.
+        expect(result).toContain('if(__r&&__r.info)return __r;');
+      });
+
+      it('drops the storage descriptor when reading an alternate', () => {
+        const result = writeAgentsMd(reader, altNames)!;
+
+        expect(result).toContain('__sw(__p,__n),t,__c?__sw(__c,__n):n,void 0)');
+      });
+
+      it('rewrites the resolved-path parameter alongside the path', () => {
+        const result = writeAgentsMd(reader, altNames)!;
+
+        expect(result).toContain(
+          'let __sw=(__s,__n)=>/(^|[\\\\/])CLAUDE\\.md$/.test(__s)?__s.slice(0,-9)+__n:__s;'
+        );
+      });
+
+      it('leaves non-CLAUDE.md reads on the original path', () => {
+        const result = writeAgentsMd(reader, altNames)!;
+
+        expect(result).toContain(
+          'if(!/(^|[\\\\/])CLAUDE\\.md$/.test(__p))return __r;'
+        );
+      });
+
+      it('offers every configured alternate', () => {
+        const result = writeAgentsMd(reader, altNames)!;
+
+        expect(result).toContain(JSON.stringify(altNames));
+      });
+    });
+
     it('should inject fallback at early return null when CLAUDE.md is missing', () => {
       const result = writeAgentsMd(mockFunction, altNames);
       expect(result).not.toBeNull();

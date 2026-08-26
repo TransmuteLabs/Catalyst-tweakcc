@@ -87,6 +87,26 @@ describe('writeInputChevronColor', () => {
     expect(result.match(/color:JVf,dimColor:YVf/g)).toHaveLength(1);
   });
 
+  it('handles the CC 2.1.246 shape (chunk-local JSX binding, no React namespace)', () => {
+    // Verbatim from 2.1.246's chunk, identifiers preserved: the runtime is
+    // imported as `i`/`f`, so the element reads `i(m,{...})` rather than
+    // `QG.jsx(m,{...})` as it did through 2.1.244.
+    const input =
+      'function MP(Pfo){let gdt=Q(6),{isLoading:UPe,isScreenReader:HPe,themeColor:Afo}=Pfo,' +
+      'jPe=Afo??void 0,FY;' +
+      'if(gdt[0]!==HPe)FY=HPe?i(Xe,{children:"$\\xA0"}):f(Xe,{children:[Ie.pointer,"\\xA0"]}),' +
+      'gdt[0]=HPe,gdt[1]=FY;else FY=gdt[1];let hdt;' +
+      'if(gdt[2]!==jPe||gdt[3]!==UPe||gdt[4]!==FY)' +
+      'hdt=i(m,{color:jPe,dimColor:UPe,children:FY}),gdt[2]=jPe;else hdt=gdt[5];return hdt}';
+    const result = writeInputChevronColor(input, 'red');
+
+    expect(result).not.toBeNull();
+    expect(result).toContain(
+      'hdt=i(m,{color:UPe?jPe:"red",dimColor:!1,children:FY})'
+    );
+    expect(result).not.toContain('color:jPe,dimColor:UPe');
+  });
+
   it('works with different identifier names', () => {
     const input =
       'var a=1,{isLoading:X$,themeColor:Y$}=Z$,W$=Y$??void 0,V$;' +

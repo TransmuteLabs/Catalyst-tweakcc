@@ -16,6 +16,9 @@ export const writeAgentsMd = (
   file: string,
   altNames: string[]
 ): string | null => {
+  const wrapper2233 = writeAgentsMdWrapper2233(file, altNames);
+  if (wrapper2233) return wrapper2233;
+
   const async2214 = writeAgentsMdAsync2214(file, altNames);
   if (async2214) return async2214;
 
@@ -70,6 +73,89 @@ const injectRerouteIntoCatch = (
   const newFile = file.slice(0, startIndex) + fn + file.slice(endIndex);
 
   showDiff(file, newFile, fn, startIndex, endIndex);
+
+  return newFile;
+};
+
+/**
+ * CC >=2.1.233: the reader takes a fourth parameter -- a storage descriptor --
+ * and when one is supplied it never touches the filesystem at all:
+ *
+ *   async function W(e,t,n,r){try{let o,s=!1;
+ *     if(r){let i=await F(r);switch(i.kind){
+ *       case"absent":return{info:null,includePaths:[]};
+ *       case"error":return H(i.code,e),{info:null,includePaths:[]};
+ *       case"skipped":s=i.isDirectory,o=null;break;
+ *       case"content":o=i.content;break}}
+ *     else{let i=G();o=await K(i,e,LIMIT,(a)=>{s=a.isDirectory()})}
+ *     ...}catch(o){return E(o,e),{info:null,includePaths:[]}}}
+ *
+ * That kills the catch-clause strategy every older matcher here uses: on the
+ * descriptor path a missing CLAUDE.md is `case"absent"`, an ordinary RETURN,
+ * and nothing is ever thrown. Injecting into the catch would leave the most
+ * common load path -- the one the memory index actually uses -- unpatched,
+ * which reads as "AGENTS.md sometimes works" rather than as a failure.
+ *
+ * So this shape is patched by WRAPPING the reader instead of editing inside
+ * it. The wrapper is exit-agnostic: it asks the original for CLAUDE.md, and
+ * whichever way the original reports "nothing there" -- absent, error, throw,
+ * empty info -- it then tries the alternates. Every memory file (user,
+ * project, local, and each step of the parent-directory walk) is read through
+ * this one function, so the wrapper covers all of them.
+ *
+ * Two details in the wrapper are load-bearing:
+ *
+ *   - The storage descriptor is DROPPED for the alternates (`void 0`). A
+ *     descriptor names one stored key; reusing it would hand back CLAUDE.md's
+ *     own bytes under the alternate's name, which is worse than not finding
+ *     the file.
+ *   - The third parameter is the resolved path (the caller passes the
+ *     symlink-resolved twin of the first). When it too ends in CLAUDE.md it
+ *     is rewritten to the alternate, otherwise the reader would look up the
+ *     alternate's content under CLAUDE.md's identity.
+ */
+const writeAgentsMdWrapper2233 = (
+  file: string,
+  altNames: string[]
+): string | null => {
+  const ID = '[$\\w]+';
+  const pattern = new RegExp(
+    `async function (${ID})\\((${ID}),(${ID}),(${ID}),(${ID})\\)\\{try\\{let (${ID}),(${ID})=!1;` +
+      `if\\(\\5\\)\\{let (${ID})=await (${ID})\\(\\5\\);switch\\(\\8\\.kind\\)\\{case"absent":` +
+      `return\\{info:null,includePaths:\\[\\]\\};`
+  );
+
+  const m = file.match(pattern);
+  if (!m || m.index === undefined) return null;
+
+  const [head, funcName, pathParam, typeParam, resolvedParam, descriptorParam] =
+    m;
+  const inner = `${funcName}$tw`;
+  const altNamesJson = JSON.stringify(altNames);
+
+  const wrapper =
+    `async function ${funcName}(${pathParam},${typeParam},${resolvedParam},${descriptorParam}){` +
+    `let __r=await ${inner}(${pathParam},${typeParam},${resolvedParam},${descriptorParam});` +
+    `if(__r&&__r.info)return __r;` +
+    `let __p=String(${pathParam}??"");` +
+    `if(!/(^|[\\\\/])CLAUDE\\.md$/.test(__p))return __r;` +
+    `let __c=String(${resolvedParam}??"");` +
+    `let __sw=(__s,__n)=>/(^|[\\\\/])CLAUDE\\.md$/.test(__s)?__s.slice(0,-9)+__n:__s;` +
+    `for(let __n of ${altNamesJson}){` +
+    `try{let __x=await ${inner}(__sw(__p,__n),${typeParam},__c?__sw(__c,__n):${resolvedParam},void 0);` +
+    `if(__x&&__x.info)return __x}catch{}}` +
+    `return __r}`;
+
+  const startIndex = m.index;
+  const renamedHead = head.replace(
+    `async function ${funcName}(`,
+    `async function ${inner}(`
+  );
+  const endIndex = startIndex + head.length;
+  const newFile =
+    file.slice(0, startIndex) + wrapper + renamedHead + file.slice(endIndex);
+
+  showDiff(file, newFile, wrapper + renamedHead, startIndex, endIndex);
 
   return newFile;
 };
