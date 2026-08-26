@@ -7,6 +7,7 @@ import {
   moduleSliceAround,
   showDiff,
 } from './index';
+import { MODULE_BOUNDARY_SPLIT_RE } from '../nativeInstallation';
 import { UserMessageDisplayConfig } from '../types';
 
 /**
@@ -238,9 +239,7 @@ export const writeUserMessageDisplay = (
 
   // On a split bundle a bundle-wide fallback is not a weaker answer, it is a
   // wrong one: it names a binding from another chunk. Refuse instead.
-  const isSplitBundle = /\n\/\*__tweakcc_module_boundary_\d+__\*\/\n/.test(
-    oldFile
-  );
+  const isSplitBundle = MODULE_BOUNDARY_SPLIT_RE.test(oldFile);
   if (isSplitBundle && (!localBox || !localText || !localChalk)) {
     console.error(
       'patch: userMessageDisplay: could not resolve Box/Text/chalk inside the ' +
