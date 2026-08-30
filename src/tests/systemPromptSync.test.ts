@@ -1723,4 +1723,63 @@ World`;
       expect(result.incomplete).toBe(false);
     });
   });
+
+  describe('syncPrompt: is the file still what that version shipped?', () => {
+    const basePrompt = {
+      id: 'test-prompt',
+      name: 'Test Prompt',
+      description: 'd',
+      version: '2.1.100',
+      pieces: ['Hello ', ' world'],
+      identifiers: [1],
+      identifierMap: { '1': 'NAME' },
+    } as unknown as StringsPrompt;
+
+    // What that version shipped, rebuilt the way the sync itself rebuilds it.
+    const shipped = promptSync.reconstructContentFromPieces(
+      basePrompt.pieces,
+      basePrompt.identifiers,
+      basePrompt.identifierMap
+    );
+
+    // The file as writePromptFile leaves it: front matter, then the body with
+    // the trailing newline gray-matter appends. That newline is the whole
+    // reason the hash index never matched.
+    const fileWith = (body: string) =>
+      `<!--\nname: Test Prompt\ndescription: d\nccVersion: 2.1.100\n-->\n${body}\n`;
+
+    const newer = {
+      ...basePrompt,
+      version: '2.1.200',
+      pieces: ['Hello ', ' world, again'],
+    } as unknown as StringsPrompt;
+
+    const arrange = async (body: string) => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(fileWith(body));
+      vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+      vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+      const download = await import('../systemPromptDownload');
+      vi.mocked(download.downloadStringsFile).mockResolvedValue({
+        version: '2.1.100',
+        prompts: [basePrompt],
+      } as unknown as StringsFile);
+    };
+
+    it('upgrades an untouched file instead of calling it a conflict', async () => {
+      await arrange(shipped);
+
+      const result = await promptSync.syncPrompt(newer);
+
+      expect(result.action).toBe('updated');
+    });
+
+    it('still reports a conflict when the body was actually edited', async () => {
+      await arrange(`${shipped} -- our own line`);
+
+      const result = await promptSync.syncPrompt(newer);
+
+      expect(result.action).toBe('conflict');
+    });
+  });
 });

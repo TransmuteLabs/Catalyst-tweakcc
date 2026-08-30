@@ -7,7 +7,7 @@ import {
   escapeDepthZeroBackticks,
   escapeNonAsciiChars,
 } from '../systemPromptSync';
-import { setAppliedHash, computeMD5Hash } from '../systemPromptHashIndex';
+import { setAppliedHashes, computeMD5Hash } from '../systemPromptHashIndex';
 
 /**
  * Result of applying system prompts
@@ -164,6 +164,11 @@ export const applySystemPrompts = async (
 
   // Track per-prompt results
   const results: PatchResult[] = [];
+
+  // Applied-content hashes, collected during the loop and written once after
+  // it. The index is bookkeeping for "does the .md still match what was last
+  // applied"; it does not affect the bytes written to cli.js.
+  const pendingAppliedHashes: Record<string, string> = {};
 
   // Search for and replace each prompt in cli.js
   for (const {
@@ -366,15 +371,12 @@ export const applySystemPrompts = async (
         () => replacements[replacementIndex++]
       );
 
-      // Store the hash of the applied prompt content
-      const appliedHash = computeMD5Hash(prompt.content);
-      let hashFailed = false;
-      try {
-        await setAppliedHash(promptId, appliedHash);
-      } catch (error) {
-        debug(`Failed to store hash for "${prompt.name}": ${error}`);
-        hashFailed = true;
-      }
+      // Collect the hash of the applied prompt content; it is written ONCE
+      // after the loop. Writing per prompt meant hundreds of whole-file
+      // read-modify-write cycles on the index, and every one of them was a
+      // chance for a transient failure to report "hash storage failed" for a
+      // prompt that had in fact been applied to cli.js.
+      pendingAppliedHashes[promptId] = computeMD5Hash(prompt.content);
 
       // Show diff in debug mode
       showDiff(
@@ -402,16 +404,11 @@ export const applySystemPrompts = async (
         details += ` (${matches.length} occurrences)`;
       }
 
-      if (hashFailed) {
-        details += ' (hash storage failed)';
-      }
-
       results.push({
         id: promptId,
         name: prompt.name,
         group: PatchGroup.SYSTEM_PROMPTS,
         applied,
-        ...(hashFailed && { failed: true }),
         details,
       });
     } else {
@@ -440,6 +437,21 @@ export const applySystemPrompts = async (
       } catch {
         verbose(`  Partial match failed (regex truncation issue)`);
       }
+    }
+  }
+
+  // One write for the whole apply. A failure here is bookkeeping only -- every
+  // prompt in pendingAppliedHashes was already substituted into `content` --
+  // but it is reported per prompt, exactly as the per-call form did, so a
+  // caller that treats `failed` as fatal keeps its old behaviour.
+  try {
+    await setAppliedHashes(pendingAppliedHashes);
+  } catch (error) {
+    debug(`Failed to store applied hashes: ${error}`);
+    for (const result of results) {
+      if (!(result.id in pendingAppliedHashes)) continue;
+      result.failed = true;
+      result.details = `${result.details ?? ''} (hash storage failed)`.trim();
     }
   }
 

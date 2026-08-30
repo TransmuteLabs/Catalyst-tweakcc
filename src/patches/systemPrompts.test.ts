@@ -15,7 +15,7 @@ vi.mock('../systemPromptHashIndex', async () => {
   const actual = await vi.importActual('../systemPromptHashIndex');
   return {
     ...actual,
-    setAppliedHash: vi.fn(),
+    setAppliedHashes: vi.fn(),
   };
 });
 
@@ -85,11 +85,11 @@ function setupMocks(
     promptData,
   ]);
   if (hashBehavior instanceof Error) {
-    vi.mocked(systemPromptHashIndex.setAppliedHash).mockRejectedValue(
+    vi.mocked(systemPromptHashIndex.setAppliedHashes).mockRejectedValue(
       hashBehavior
     );
   } else {
-    vi.mocked(systemPromptHashIndex.setAppliedHash).mockResolvedValue();
+    vi.mocked(systemPromptHashIndex.setAppliedHashes).mockResolvedValue();
   }
 }
 
@@ -814,7 +814,7 @@ describe('systemPrompts.ts', () => {
         badPrompt,
         goodPrompt,
       ]);
-      vi.mocked(systemPromptHashIndex.setAppliedHash).mockResolvedValue();
+      vi.mocked(systemPromptHashIndex.setAppliedHashes).mockResolvedValue();
 
       const cliContent = 'desc:"Original text"';
 

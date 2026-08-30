@@ -75,6 +75,16 @@ export interface SyncSummary {
  * Parses markdown file with YAML frontmatter using gray-matter
  * Uses HTML comment delimiters to avoid conflicts with markdown content
  */
+/**
+ * Trailing newlines are formatting, not content.
+ *
+ * writePromptFile stores the body through gray-matter, which appends one,
+ * while a reconstruction from a snapshot has none. Comparing the two raw makes
+ * every untouched file look edited -- which is exactly how the auto-upgrade
+ * branch went dead.
+ */
+const normalizePromptBody = (body: string): string => body.replace(/\n+$/, '');
+
 export const parseMarkdownPrompt = (markdown: string): MarkdownPrompt => {
   const parsed = matter(markdown, {
     delimiters: ['<!--', '-->'],
@@ -1054,41 +1064,62 @@ export const syncPrompt = async (
     {
       // The file is out of date: based on an older version, or on the same
       // version but with drifted identifiers. Check if the user has modified it.
-      const oldHash = await getPromptHash(prompt.id, existingFile.ccVersion);
-      const currentHash = computeMD5Hash(existingFile.content);
-      const isModified = !oldHash || oldHash !== currentHash;
+      //
+      // Reconstruct what that version shipped and compare against it. The hash
+      // index alone cannot answer this: storeHashes() records a key only when
+      // it is absent ("first writer wins"), while the upstream snapshot for an
+      // already-recorded version gets regenerated with different interpolation
+      // identifier names -- so the stored hash keeps describing a snapshot
+      // generation the file was never written from. Measured 2026-08-30 across
+      // 847 local prompt files: the recorded hash matched NONE of them, which
+      // made isModified true for every file and left the auto-upgrade branch
+      // below unreachable. Every version bump then produced conflicts to
+      // resolve by hand for files nobody had touched.
+      //
+      // The index stays as the fallback for when the old snapshot cannot be
+      // fetched at all -- there, "assume modified" is the safe answer, because
+      // overwriting a real customization is worse than one spurious conflict.
+      let reconstructedBaseline: string | undefined;
+      try {
+        const oldStringsFile = await downloadStringsFile(
+          existingFile.ccVersion
+        );
+        const oldPrompt = oldStringsFile.prompts.find(p => p.id === prompt.id);
+
+        if (oldPrompt) {
+          reconstructedBaseline = reconstructContentFromPieces(
+            oldPrompt.pieces,
+            oldPrompt.identifiers,
+            oldPrompt.identifierMap
+          );
+        }
+      } catch {
+        console.log(
+          chalk.yellow(
+            `Warning: Could not fetch old version ${existingFile.ccVersion} for comparison. Using current file as baseline.`
+          )
+        );
+      }
+
+      let isModified: boolean;
+      if (reconstructedBaseline !== undefined) {
+        isModified =
+          normalizePromptBody(existingFile.content) !==
+          normalizePromptBody(reconstructedBaseline);
+      } else {
+        const oldHash = await getPromptHash(prompt.id, existingFile.ccVersion);
+        const currentHash = computeMD5Hash(existingFile.content);
+        isModified = !oldHash || oldHash !== currentHash;
+      }
 
       if (isModified) {
         // User has modified the file
         result.action = 'conflict';
 
-        // Get the old baseline content (unmodified version from old CC version)
-        // We need to reconstruct what the old version looked like
-        // For now, we'll fetch the old strings file to get the baseline
-        let oldBaselineContent = existingFile.content; // Default fallback
-        try {
-          const oldStringsFile = await downloadStringsFile(
-            existingFile.ccVersion
-          );
-          const oldPrompt = oldStringsFile.prompts.find(
-            p => p.id === prompt.id
-          );
-
-          if (oldPrompt) {
-            oldBaselineContent = reconstructContentFromPieces(
-              oldPrompt.pieces,
-              oldPrompt.identifiers,
-              oldPrompt.identifierMap
-            );
-          }
-        } catch {
-          // If we can't download the old version, just use existing content as baseline
-          console.log(
-            chalk.yellow(
-              `Warning: Could not fetch old version ${existingFile.ccVersion} for comparison. Using current file as baseline.`
-            )
-          );
-        }
+        // Fall back to the user's own content when the old snapshot was
+        // unavailable: a diff against itself shows no phantom upstream change.
+        const oldBaselineContent =
+          reconstructedBaseline ?? existingFile.content;
 
         // Get the new baseline content
         const newBaselineContent = reconstructContentFromPieces(

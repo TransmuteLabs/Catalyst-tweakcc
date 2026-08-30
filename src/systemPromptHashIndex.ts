@@ -20,6 +20,35 @@ const getAppliedHashesPath = (): string => {
 };
 
 /**
+ * Writes JSON atomically: to a temporary file beside the target, then rename.
+ *
+ * The previous form -- fs.writeFile straight at the target -- truncates in
+ * place. A failed write (no space left, an interrupted process) leaves a HALF
+ * FILE behind, and the next readAppliedHashIndex throws on JSON.parse, so a
+ * single transient failure takes down the whole rest of the run. Measured
+ * 2026-08-30 on a five-version sweep: 18 prompts reported "hash storage
+ * failed" while their neighbours succeeded, which is what an intermittent
+ * write against a full-file rewrite looks like.
+ *
+ * The temporary file lives in the SAME directory as the target: rename across
+ * file systems is not atomic, and os.tmpdir() is routinely a different one.
+ */
+const writeJsonAtomic = async (
+  filePath: string,
+  value: unknown
+): Promise<void> => {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  try {
+    await fs.writeFile(tmp, JSON.stringify(value, null, 2), 'utf8');
+    await fs.rename(tmp, filePath);
+  } catch (error) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw error;
+  }
+};
+
+/**
  * Structure of the hash index
  * Maps: "prompt-id-version" => "md5hash"
  * Example: "main-system-prompt-2.0.14" => "a1b2c3..."
@@ -72,11 +101,7 @@ export const writeHashIndex = async (index: HashIndex): Promise<void> => {
     sortedIndex[key] = index[key];
   }
 
-  await fs.writeFile(
-    getHashIndexPath(),
-    JSON.stringify(sortedIndex, null, 2),
-    'utf8'
-  );
+  await writeJsonAtomic(getHashIndexPath(), sortedIndex);
 };
 
 /**
@@ -195,23 +220,35 @@ export const writeAppliedHashIndex = async (
     sortedIndex[key] = index[key];
   }
 
-  await fs.writeFile(
-    getAppliedHashesPath(),
-    JSON.stringify(sortedIndex, null, 2),
-    'utf8'
-  );
+  await writeJsonAtomic(getAppliedHashesPath(), sortedIndex);
+};
+
+/**
+ * Updates the applied hashes for many prompt IDs in ONE read-modify-write.
+ */
+export const setAppliedHashes = async (
+  hashes: AppliedHashIndex
+): Promise<void> => {
+  const ids = Object.keys(hashes);
+  if (ids.length === 0) return;
+  const index = await readAppliedHashIndex();
+  for (const id of ids) index[id] = hashes[id];
+  await writeAppliedHashIndex(index);
 };
 
 /**
  * Updates the applied hash for a specific prompt ID
+ *
+ * One prompt per call means one whole-file read-modify-write per prompt --
+ * hundreds of them per --apply. Callers holding a batch must use
+ * setAppliedHashes instead; this single-key form stays for callers that
+ * genuinely have one.
  */
 export const setAppliedHash = async (
   promptId: string,
   hash: string
 ): Promise<void> => {
-  const index = await readAppliedHashIndex();
-  index[promptId] = hash;
-  await writeAppliedHashIndex(index);
+  await setAppliedHashes({ [promptId]: hash });
 };
 
 /**

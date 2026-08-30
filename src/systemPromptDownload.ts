@@ -9,14 +9,30 @@ import { PROMPT_CACHE_DIR } from './config';
  * @param version - Version string in format "X.Y.Z" (e.g., "2.0.30")
  * @returns Promise that resolves to the parsed JSON content
  */
+/**
+ * In-process memo on top of the on-disk cache.
+ *
+ * syncPrompts now reconstructs the base version for EVERY out-of-date file to
+ * decide whether the user touched it, so one sync asks for the same snapshot
+ * hundreds of times. Without this, each ask re-reads and re-parses a
+ * multi-megabyte JSON. Keyed by version, which is what the file is named by;
+ * a snapshot revised upstream mid-run is not a case this cache needs to see,
+ * since the on-disk copy is already pinned for the run.
+ */
+const inProcessSnapshots = new Map<string, StringsFile>();
+
 export async function downloadStringsFile(
   version: string
 ): Promise<StringsFile> {
+  const memo = inProcessSnapshots.get(version);
+  if (memo) return memo;
+
   // Check cache first
   const cacheFilePath = path.join(PROMPT_CACHE_DIR, `prompts-${version}.json`);
   try {
     const cachedContent = await fs.readFile(cacheFilePath, 'utf-8');
     const cached = JSON.parse(cachedContent) as StringsFile;
+    inProcessSnapshots.set(version, cached);
     return cached;
   } catch {
     // Cache miss or invalid - proceed to download
@@ -64,6 +80,7 @@ export async function downloadStringsFile(
       );
     }
 
+    inProcessSnapshots.set(version, jsonData);
     return jsonData;
   } catch (error) {
     if (error instanceof Error) {
