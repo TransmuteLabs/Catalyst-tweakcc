@@ -36,6 +36,50 @@ const patchModeSwitchingFunction = (oldFile: string): string | null => {
       /if\s*\(\s*\(?[$\w]+\s*===\s*"opusplan"\s*\|\|\s*[$\w]+\s*===\s*"opusplan\[1m\]"\)?\s*&&\s*[$\w]+\s*===\s*"plan"\s*&&\s*![$\w]+\s*\)/;
     if (nativePattern.test(oldFile)) return oldFile;
 
+    // 2.1.251 rewrote the chooser: the inline test above no longer exists at
+    // all. The alias is now resolved by a family mapper the chooser calls
+    //   function qde(e){if(e==="opusplan"||e==="opusplan[1m]")return"opus"; ...}
+    //   function hp(e){let{permissionMode:t,...,exceeds200kTokens:o=!1}=e;
+    //                  if(t!=="plan")return r;let u=lf(),d=qde(u); ...}
+    // and the 1M flavour is picked further down by `e==="opusplan[1m]"||YS()`.
+    // Recognising the mapper ALONE would be a false pass: a build whose plan
+    // chooser stopped calling it, or that dropped the 1M arm, would read as
+    // "already native" and the feature would vanish silently. So all three
+    // halves are required, and each missing half names itself.
+    const nativeAliasMapper =
+      /function\s+([$\w]+)\(\s*([$\w]+)\s*\)\s*\{\s*if\s*\(\s*\2\s*===\s*"opusplan"\s*\|\|\s*\2\s*===\s*"opusplan\[1m\]"\s*\)\s*return\s*"opus"\s*;/;
+    const mapperMatch = oldFile.match(nativeAliasMapper);
+    if (mapperMatch) {
+      const mapperName = mapperMatch[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      // From the destructuring's closing brace to the call: no braces allowed,
+      // so the call cannot be borrowed from a neighbouring function. A future
+      // chooser that puts a block between the two fails CLOSED here, which is
+      // the outcome this patch wants when it can no longer prove the wiring.
+      const nativePlanChooser = new RegExp(
+        'permissionMode\\s*:[^}]{0,80}exceeds200kTokens[^}]{0,40}\\}\\s*=\\s*[$\\w]+\\s*;' +
+          '[^{}]{0,300}?(?<![$\\w])' +
+          mapperName +
+          '\\s*\\('
+      );
+      // `x==="opusplan[1m]"||...` — the test that picks the 1M variant of the
+      // plan model. The mapper's own comparison is followed by `)`, never `||`,
+      // so this cannot be satisfied by the mapper itself.
+      const nativeOneMillionArm = /===\s*"opusplan\[1m\]"\s*\|\|/;
+      const chooserOk = nativePlanChooser.test(oldFile);
+      const oneMillionOk = nativeOneMillionArm.test(oldFile);
+      if (chooserOk && oneMillionOk) return oldFile;
+
+      console.error(
+        'patch: opusplan1m: patchModeSwitchingFunction: the alias mapper ' +
+          `${mapperMatch[1]}() knows opusplan[1m], but ` +
+          (!chooserOk
+            ? 'the plan-mode chooser does not call it'
+            : 'nothing selects the 1M variant of the plan model') +
+          ' — refusing to report native support that is not wired up'
+      );
+      return null;
+    }
+
     console.error(
       'patch: opusplan1m: patchModeSwitchingFunction: failed to find mode switching pattern'
     );
