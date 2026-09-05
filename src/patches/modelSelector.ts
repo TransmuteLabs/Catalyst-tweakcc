@@ -24,9 +24,17 @@ export const CUSTOM_MODELS: { value: string; label: string; description: string 
 const findCustomModelListInsertionPoint = (
   fileContents: string
 ): { insertionIndex: number; modelListVar: string } | null => {
-  // 1. Find the custom model push pattern
+  // 1. Find the custom model push pattern.
+  // Only `value:` still carries a bare identifier across CC builds. 2.1.261 made
+  // `label` an expression (`re??F`) and `description` a ternary whose second arm is
+  // a template literal, so pinning either value AS A WHOLE makes the locator miss
+  // the very site it is standing on (measured: the old form matches 2.1.257-2.1.260
+  // and fails on 2.1.261). Anchor on the stable keys and on the "Custom model"
+  // literal; the values stay unconstrained. `\.push\(\{` is load-bearing: it keeps
+  // out the sibling site `X.push(f(C)??{value:...,description:"Custom model"})`,
+  // which carries the same literal but is NOT the insertion point.
   const pushPattern =
-    /[,;{} ]([$\w]+)\.push\(\{value:[$\w]+,label:[$\w]+,description:"Custom model"\}\)/;
+    /[,;{} ]([$\w]+)\.push\(\{value:[$\w]+,label:[^{};]{0,120}?,description:[^{};]{0,200}?"Custom model"/;
   const pushMatch = fileContents.match(pushPattern);
   if (!pushMatch || pushMatch.index === undefined) {
     console.error(
