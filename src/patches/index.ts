@@ -701,10 +701,17 @@ export const applyCustomization = async (
   // ==========================================================================
   // Define patch implementations (keyed by PatchId)
   // ==========================================================================
-  // Keep model list customization and select-menu size behavior in sync.
-  // Disabling model customizations should restore both selectors to vanilla CC behavior.
   const modelCustomizationsEnabled =
     config.settings.misc?.enableModelCustomizations ?? true;
+  // The select-menu size patch owns a knob of its own rather than riding the
+  // model-list one. Its reach is every select menu in the product (agent,
+  // permission and command pickers), plus the help-menu height cap and the
+  // 6-item slash-suggestion cap -- none of which the model list feeds. Binding
+  // it to enableModelCustomizations made turning the extra models OFF also
+  // shrink every unrelated menu back to five rows, a loss nobody asked for and
+  // nothing announced.
+  const selectMenuSizeIncreaseEnabled =
+    config.settings.misc?.enableSelectMenuSizeIncrease ?? true;
   const patchImplementations: Record<PatchId, PatchImplementation> = {
     // Always Applied
     'verbose-property': {
@@ -761,7 +768,7 @@ export const applyCustomization = async (
     },
     'show-more-items-in-select-menus': {
       fn: c => writeShowMoreItemsInSelectMenus(c, 25),
-      condition: modelCustomizationsEnabled,
+      condition: selectMenuSizeIncreaseEnabled,
     },
     'table-format': {
       fn: c => writeTableFormat(c, tableFormat),

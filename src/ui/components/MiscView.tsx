@@ -84,6 +84,7 @@ export function MiscView({ onSubmit }: MiscViewProps) {
     allowCustomAgentModels: false,
     enableContextLimitOverride: false,
     enableModelCustomizations: true,
+    enableSelectMenuSizeIncrease: true,
     enableVoiceMode: false,
     enableVoiceConciseOutput: true,
     enableChannelsMode: false,
@@ -242,6 +243,20 @@ export function MiscView({ onSubmit }: MiscViewProps) {
             ensureMisc();
             settings.misc!.enableModelCustomizations =
               !settings.misc!.enableModelCustomizations;
+          });
+        },
+      },
+      {
+        id: 'enableSelectMenuSizeIncrease',
+        title: 'Show more items in select menus',
+        description:
+          'Raise the select-menu item count from 5 to 25 everywhere (agent, permission and command pickers), lift the help-menu height cap and the 6-item slash-suggestion cap. Independent of the model list.',
+        getValue: () => settings.misc?.enableSelectMenuSizeIncrease ?? true,
+        toggle: () => {
+          updateSettings(settings => {
+            ensureMisc();
+            settings.misc!.enableSelectMenuSizeIncrease =
+              !settings.misc!.enableSelectMenuSizeIncrease;
           });
         },
       },

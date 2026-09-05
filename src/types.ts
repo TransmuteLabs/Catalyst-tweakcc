@@ -136,6 +136,7 @@ export interface MiscConfig {
   allowCustomAgentModels: boolean;
   enableContextLimitOverride: boolean;
   enableModelCustomizations: boolean;
+  enableSelectMenuSizeIncrease: boolean;
   enableVoiceMode: boolean;
   enableVoiceConciseOutput: boolean;
   enableChannelsMode: boolean;

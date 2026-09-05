@@ -104,7 +104,7 @@ describe('model customization toggle patch conditions', () => {
     vi.mocked(fs.readFile).mockResolvedValue('base-content');
   });
 
-  it('skips both model customization patches when disabled', async () => {
+  it('drops only the model list when model customizations are disabled', async () => {
     const config = baseConfig();
     config.settings.misc.enableModelCustomizations = false;
 
@@ -118,9 +118,51 @@ describe('model customization toggle patch conditions', () => {
     );
 
     expect(modelResult).toMatchObject({ applied: false, skipped: true });
-    expect(showMoreResult).toMatchObject({ applied: false, skipped: true });
+    expect(showMoreResult).toMatchObject({ applied: true, failed: false });
     expect(vi.mocked(writeModelCustomizations)).not.toHaveBeenCalled();
+    expect(vi.mocked(writeShowMoreItemsInSelectMenus)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(replaceFileBreakingHardLinks)).toHaveBeenCalledWith(
+      '/tmp/claude-cli.js',
+      expect.stringContaining('|show'),
+      'patch'
+    );
+  });
+
+  it('drops only the menu size when the select-menu knob is disabled', async () => {
+    const config = baseConfig();
+    config.settings.misc.enableSelectMenuSizeIncrease = false;
+
+    const { results } = await applyCustomization(config, ccInstInfo, [
+      ...PATCH_IDS,
+    ]);
+
+    const modelResult = results.find(r => r.id === 'model-customizations');
+    const showMoreResult = results.find(
+      r => r.id === 'show-more-items-in-select-menus'
+    );
+
+    expect(modelResult).toMatchObject({ applied: true, failed: false });
+    expect(showMoreResult).toMatchObject({ applied: false, skipped: true });
+    expect(vi.mocked(writeModelCustomizations)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(writeShowMoreItemsInSelectMenus)).not.toHaveBeenCalled();
+  });
+
+  it('skips both when both knobs are disabled', async () => {
+    const config = baseConfig();
+    config.settings.misc.enableModelCustomizations = false;
+    config.settings.misc.enableSelectMenuSizeIncrease = false;
+
+    const { results } = await applyCustomization(config, ccInstInfo, [
+      ...PATCH_IDS,
+    ]);
+
+    expect(results.find(r => r.id === 'model-customizations')).toMatchObject({
+      applied: false,
+      skipped: true,
+    });
+    expect(
+      results.find(r => r.id === 'show-more-items-in-select-menus')
+    ).toMatchObject({ applied: false, skipped: true });
     expect(vi.mocked(replaceFileBreakingHardLinks)).toHaveBeenCalledWith(
       '/tmp/claude-cli.js',
       'base-content',

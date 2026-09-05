@@ -718,6 +718,7 @@ export const DEFAULT_SETTINGS: Settings = {
     allowCustomAgentModels: false,
     enableContextLimitOverride: false,
     enableModelCustomizations: true,
+    enableSelectMenuSizeIncrease: true,
     enableVoiceMode: false,
     enableVoiceConciseOutput: true,
     enableChannelsMode: false,
