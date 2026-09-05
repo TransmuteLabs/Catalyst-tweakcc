@@ -193,21 +193,26 @@ function resolveVars(content: string): ResolvedVars {
  * @param noSandbox - If true, skip the permission sandbox entirely
  * @returns The modified JavaScript content returned by the script
  */
-async function runSandboxedScript(
+export async function runSandboxedScript(
   script: string,
   inputCode: string,
   vars: ResolvedVars,
   noSandbox = false
 ): Promise<string> {
+  const envelope = JSON.stringify({ script, vars }) + '\n' + inputCode;
+
   const wrapper = `
-    let input = '';
-    process.stdin.on('data', c => input += c);
+    let chunks = [];
+    process.stdin.on('data', c => chunks.push(c));
     process.stdin.on('end', async () => {
       try {
-        const vars = ${JSON.stringify(vars)};
+        const buf = Buffer.concat(chunks).toString('utf8');
+        const nl = buf.indexOf('\\n');
+        const head = JSON.parse(buf.slice(0, nl));
+        const input = buf.slice(nl + 1);
         process.env = {};
-        const fn = new Function('js', 'vars', ${JSON.stringify(script)});
-        const result = await fn(input, vars);
+        const fn = new Function('js', 'vars', head.script);
+        const result = await fn(input, head.vars);
         process.stdout.write(JSON.stringify({"r": result}));
       } catch (e) {
         process.stderr.write(e instanceof Error ? e.message : String(e));
@@ -217,12 +222,12 @@ async function runSandboxedScript(
   `;
 
   if (noSandbox) {
-    return spawnNodeWithWrapper([], wrapper, inputCode);
+    return spawnNodeWithWrapper([], wrapper, envelope);
   }
 
   // Try --permission first (Node 24+)
   try {
-    return await spawnNodeWithWrapper(['--permission'], wrapper, inputCode);
+    return await spawnNodeWithWrapper(['--permission'], wrapper, envelope);
   } catch (error) {
     if (isBadOptionError(error)) {
       // Fall through to try the older flag
@@ -236,7 +241,7 @@ async function runSandboxedScript(
     return await spawnNodeWithWrapper(
       ['--experimental-permission'],
       wrapper,
-      inputCode
+      envelope
     );
   } catch (error) {
     if (isBadOptionError(error)) {
@@ -272,15 +277,18 @@ function getNodeVersion(): string {
 }
 
 /**
- * Spawns a node process with the given extra CLI flags, feeds `inputCode` on
- * stdin, and resolves with the JSON-wrapped result from stdout.
+ * Spawns a node process with the given extra CLI flags, feeds `stdinPayload`
+ * on stdin, and resolves with the JSON-wrapped result from stdout.
  */
 function spawnNodeWithWrapper(
   extraArgs: string[],
   wrapper: string,
-  inputCode: string
+  stdinPayload: string
 ): Promise<string> {
   return new Promise((resolve, reject) => {
+    // Nothing whose size a consumer controls may ride in argv: Linux caps a
+    // single argument at MAX_ARG_STRLEN — 32 pages of 4096 bytes, 131 072 —
+    // regardless of the total ARG_MAX budget, so the payload goes via stdin.
     const child = spawn('node', [...extraArgs, '-e', wrapper], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -309,7 +317,7 @@ function spawnNodeWithWrapper(
       }
     });
 
-    child.stdin.write(inputCode);
+    child.stdin.write(stdinPayload);
     child.stdin.end();
   });
 }
