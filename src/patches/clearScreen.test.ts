@@ -66,6 +66,36 @@ describe('clearScreen', () => {
     expect(result).toBe(input);
   });
 
+  it('finds the redraw site when the map is reached through a lazy accessor (CC 2.1.257+)', () => {
+    const input =
+      'const x=1;' +
+      renderFilter +
+      ';' +
+      slashCommandArray +
+      '}function F5t(){ws().get(process.stdout)?.forceRedraw()}';
+    const result = writeClearScreen(input);
+
+    expect(result).not.toBeNull();
+    expect(result).toContain(
+      'globalThis.__tweakccForceRedraw=()=>ws().get(process.stdout)?.forceRedraw()'
+    );
+    expect(result).toContain(
+      'function F5t(){ws().get(process.stdout)?.forceRedraw()}'
+    );
+    expect(result).toContain('name:"clear-screen"');
+  });
+
+  it('does not accept an accessor call that takes arguments', () => {
+    const input =
+      'const x=1;' +
+      renderFilter +
+      ';' +
+      slashCommandArray +
+      ';function cHz(){ws(k).get(process.stdout)?.forceRedraw()}';
+
+    expect(writeClearScreen(input)).toBeNull();
+  });
+
   it('returns null when forceRedraw function not found', () => {
     const result = writeClearScreen('const x=1;');
 

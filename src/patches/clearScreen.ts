@@ -10,8 +10,17 @@ export const writeClearScreen = (oldFile: string): string | null => {
     return oldFile;
   }
 
+  // The renderer map is reached either as a module-level binding (`Io.get(...)`)
+  // or, since CC 2.1.257, through a lazy accessor call (`ws().get(...)`).
+  // Pinning a bare identifier made the locator miss the site it stands on for
+  // three releases in a row (measured across the pristine corpus: the bare form
+  // matches 2.1.251-2.1.252 and finds nothing on 2.1.257/258/259/261, while the
+  // form below matches exactly one site on every one of them). The trailing
+  // `()` stays OPTIONAL rather than becoming a general call expression: an
+  // argument list could carry state that must not be re-evaluated on every
+  // redraw, and the replacement below re-evaluates the accessor at each call.
   const redrawPattern =
-    /([,;{}])(function [$\w]+\(\)\{)([$\w]+)\.get\(process\.stdout\)\?\.forceRedraw\(\)\}/;
+    /([,;{}])(function [$\w]+\(\)\{)([$\w]+(?:\(\))?)\.get\(process\.stdout\)\?\.forceRedraw\(\)\}/;
   const redrawMatch = oldFile.match(redrawPattern);
   if (!redrawMatch || redrawMatch.index === undefined) {
     debug('patch: clearScreen: failed to find forceRedraw function');
