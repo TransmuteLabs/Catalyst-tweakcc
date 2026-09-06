@@ -12,7 +12,7 @@ import {
   ThinkingVerbsConfig,
   TweakccConfig,
 } from './types';
-import { debug, expandTilde, deepMergeWithDefaults } from './utils';
+import { debug, deepMergeWithDefaults } from './utils';
 import { hasUnappliedSystemPromptChanges } from './systemPromptHashIndex';
 import {
   migrateUserMessageDisplayToV320,
@@ -32,11 +32,33 @@ import {
 // 3. If ~/.claude/tweakcc exists, use it (Claude ecosystem alignment)
 // 4. If $XDG_CONFIG_HOME is set, use $XDG_CONFIG_HOME/tweakcc
 // 5. Otherwise, use ~/.tweakcc (default)
+//
+// getConfigDir() runs while this module is still evaluating (CONFIG_DIR below),
+// and utils.ts reaches this module through ./patches/modelSelector. A graph
+// entered at utils therefore arrives here with utils' own exports still
+// uninitialised, so the resolver must dereference nothing from a cycle partner:
+// tilde expansion is duplicated from utils.expandTilde on purpose, and debug()
+// is called defensively. Measured 2026-09-06: the TWEAKCC_CONFIG_DIR branch
+// threw "(0 , expandTilde) is not a function" for every entry through utils.
+const expandTildeAtLoad = (filepath: string): string =>
+  filepath.startsWith('~')
+    ? path.join(os.homedir(), filepath.slice(1))
+    : filepath;
+
+const debugAtLoad = (message: string): void => {
+  try {
+    debug(message);
+  } catch {
+    // Cycle partner not initialised yet; a diagnostic line is not worth
+    // taking down module evaluation.
+  }
+};
+
 export const getConfigDir = (): string => {
   // Check TWEAKCC_CONFIG_DIR first (explicit override)
   const tweakccConfigDir = process.env.TWEAKCC_CONFIG_DIR?.trim();
   if (tweakccConfigDir && tweakccConfigDir.length > 0) {
-    return expandTilde(tweakccConfigDir);
+    return expandTildeAtLoad(tweakccConfigDir);
   }
 
   const defaultDir = path.join(os.homedir(), '.tweakcc');
@@ -49,7 +71,7 @@ export const getConfigDir = (): string => {
       return defaultDir;
     }
   } catch (e) {
-    debug(`Failed to check if ${defaultDir} exists: ${e}`);
+    debugAtLoad(`Failed to check if ${defaultDir} exists: ${e}`);
     // If we can't check, fall through to next location
   }
 
@@ -59,7 +81,7 @@ export const getConfigDir = (): string => {
       return claudeDir;
     }
   } catch (e) {
-    debug(`Failed to check if ${claudeDir} exists: ${e}`);
+    debugAtLoad(`Failed to check if ${claudeDir} exists: ${e}`);
     // If we can't check, fall through to XDG logic
   }
 
