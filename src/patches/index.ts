@@ -141,6 +141,13 @@ export interface PatchResult {
   applied: boolean;
   failed?: boolean;
   skipped?: boolean;
+  // WHY a patch produced no change, not merely THAT it produced none. A single
+  // "skipped" collapses three unrelated causes -- the operator's config, the
+  // installation's version, and a locator that ran and matched nothing -- and a
+  // consumer counting them cannot tell whose fault a number is. Every branch
+  // that leaves `applied` false sets this, so an unset value means "landed or
+  // failed", never "some third thing nobody labelled".
+  skipKind?: 'version' | 'config' | 'filter' | 'noop';
   details?: string;
   description?: string;
 }
@@ -502,10 +509,16 @@ export const getAllPatchDefinitions = (): PatchDefinition[] => {
   return [...PATCH_DEFINITIONS];
 };
 
-/** Patch implementation with function and optional condition */
-interface PatchImplementation {
+/** Patch implementation with function and optional conditions */
+export interface PatchImplementation {
   fn: (content: string) => string | null;
+  // Two conditions, not one, because they have different OWNERS. `condition` is
+  // the operator's settings; `versionCondition` is the installation's version.
+  // Merged into one boolean the two are indistinguishable downstream, and a
+  // patch that this version simply does not need reads as one the operator
+  // turned off.
   condition?: boolean;
+  versionCondition?: boolean;
 }
 
 // =============================================================================
@@ -529,7 +542,7 @@ export const escapeIdent = (ident: string): string => {
  * Apply patches to content using the implementations map, tracking results.
  * @param patchFilter - Optional list of patch IDs to apply (if provided, only matching patches are applied)
  */
-const applyPatchImplementations = (
+export const applyPatchImplementations = (
   content: string,
   implementations: Record<PatchId, PatchImplementation>,
   patchFilter?: string[] | null
@@ -548,6 +561,24 @@ const applyPatchImplementations = (
         group: def.group,
         applied: false,
         skipped: true,
+        skipKind: 'filter',
+        description: def.description,
+      });
+      continue;
+    }
+
+    // The VERSION is asked first and the operator's config second. Order is not
+    // cosmetic: on a version that cannot carry a patch at all, the operator's
+    // setting decides nothing, and reporting such a patch as "switched off by
+    // config" hands its cause to the wrong owner.
+    if (impl.versionCondition === false) {
+      results.push({
+        id: def.id,
+        name: def.name,
+        group: def.group,
+        applied: false,
+        skipped: true,
+        skipKind: 'version',
         description: def.description,
       });
       continue;
@@ -561,6 +592,7 @@ const applyPatchImplementations = (
         group: def.group,
         applied: false,
         skipped: true,
+        skipKind: 'config',
         description: def.description,
       });
       continue;
@@ -592,12 +624,19 @@ const applyPatchImplementations = (
       content = result as string;
     }
 
+    // A patch that was TRIED and changed nothing is not a patch that was never
+    // tried: its locator matched no site and said so to nobody. Without a label
+    // of its own it prints the same sign as a patch switched off deliberately,
+    // and a silent miss hides behind a deliberate absence.
     results.push({
       id: def.id,
       name: def.name,
       group: def.group,
       applied,
       failed,
+      ...(!applied && !failed
+        ? { skipped: true, skipKind: 'noop' as const }
+        : {}),
       description: def.description,
     });
   }
@@ -726,7 +765,7 @@ export const applyCustomization = async (
     },
     'thinking-block-styling': {
       fn: c => writeThinkingBlockStyling(c),
-      condition:
+      versionCondition:
         ccInstInfo.version == null ||
         compareVersions(ccInstInfo.version, '2.1.26') < 0,
     },
@@ -811,9 +850,10 @@ export const applyCustomization = async (
         ),
       condition:
         config.settings.thinkingStyle.updateInterval !==
-          DEFAULT_SETTINGS.thinkingStyle.updateInterval &&
-        (ccInstInfo.version == null ||
-          compareVersions(ccInstInfo.version, '2.1.27') < 0),
+        DEFAULT_SETTINGS.thinkingStyle.updateInterval,
+      versionCondition:
+        ccInstInfo.version == null ||
+        compareVersions(ccInstInfo.version, '2.1.27') < 0,
     },
     'thinker-symbol-width': {
       fn: c =>
@@ -984,12 +1024,10 @@ export const applyCustomization = async (
     },
     'conversation-title': {
       fn: c => writeConversationTitle(c),
-      condition:
-        (config.settings.misc?.enableConversationTitle ?? true) &&
-        !!(
-          ccInstInfo.version &&
-          compareVersions(ccInstInfo.version, '2.0.64') < 0
-        ),
+      condition: config.settings.misc?.enableConversationTitle ?? true,
+      versionCondition: !!(
+        ccInstInfo.version && compareVersions(ccInstInfo.version, '2.0.64') < 0
+      ),
     },
     'voice-mode': {
       fn: c =>

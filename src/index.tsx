@@ -140,11 +140,24 @@ function printPatchResults(
     console.log(`\n  ${chalk.bold(group)}:`);
 
     for (const result of filtered) {
+      // Five signs, one per outcome, because a consumer counts them. `○` used to
+      // mean three unrelated things at once -- switched off by config, not
+      // applicable to this version, and tried-but-matched-nothing -- so no count
+      // of circles belonged to any single owner. The sign follows `skipKind`;
+      // the LINE's shape does not change (sign, space, name), because readers
+      // take the name as everything after the sign and one space.
+      // 'filter' keeps `○` deliberately: adding a sixth sign would break every
+      // reader that enumerates the known set, and --patch is an interactive
+      // selection the operator just made by hand.
       const status = result.failed
         ? chalk.red('✗')
         : result.applied
           ? chalk.green('✓')
-          : chalk.dim('○');
+          : result.skipKind === 'version'
+            ? chalk.dim('⊘')
+            : result.skipKind === 'noop'
+              ? chalk.dim('≡')
+              : chalk.dim('○');
       const details = result.details ? `: ${result.details}` : '';
       // Show description in gray on the same line for applied patches only
       const description =
