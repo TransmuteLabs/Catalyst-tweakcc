@@ -108,6 +108,13 @@ describe('applyPatchImplementations: why a patch produced no change', () => {
     // The whole point of the field: every outcome that is neither landed nor
     // failed names its own cause. An unlabelled one would print the same sign
     // as a deliberate switch-off and be counted as one.
+    //
+    // The invariant belongs to the FIELD and binds BOTH producers of
+    // PatchResult; this pin measures only applyPatchImplementations. The other
+    // producer is applySystemPrompts, pinned in systemPrompts.test.ts
+    // ('every outcome of applySystemPrompts names its own cause'), and that pin
+    // also carries a positive denominator, because a filter of this shape
+    // cannot see a branch that creates no result at all.
     const unlabelled = results.filter(
       r => !r.applied && !r.failed && r.skipKind === undefined
     );

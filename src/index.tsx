@@ -23,6 +23,7 @@ import {
   getAllPatchDefinitions,
 } from './patches/index';
 import { PatchedBundleParseError } from './patches/parseGate';
+import { patchFailureSummaryLines } from './patchFailureSummary';
 import {
   preloadStringsFile,
   getSystemPromptDefinitions,
@@ -480,29 +481,15 @@ async function handleApplyMode(
 
     // Check if any patches failed
     const hasFailures = results.some(r => r.failed);
-    const hasSystemPromptChanges = results.some(
-      r => r.group === PatchGroup.SYSTEM_PROMPTS && r.applied
-    );
 
     if (hasFailures) {
       console.log(chalk.yellow('Customizations applied with some failures.'));
-      console.log(
-        chalk.dim(
-          'These patching errors do not affect your system prompt patches.'
-        )
-      );
-      if (hasSystemPromptChanges) {
-        console.log(
-          chalk.dim(
-            'Your system prompt customizations were still applied successfully.'
-          )
-        );
+      // Which sentences follow is a decision about the results, so it lives in
+      // a module a test can import; this file ends in a module-level main(),
+      // and importing it to check the wording would run the CLI.
+      for (const line of patchFailureSummaryLines(results)) {
+        console.log(chalk.dim(line));
       }
-      console.log(
-        chalk.dim(
-          'Please open an issue on https://github.com/Piebald-AI/tweakcc/issues/new reporting these patching errors.'
-        )
-      );
     } else {
       console.log(chalk.green('Customizations applied successfully!'));
     }

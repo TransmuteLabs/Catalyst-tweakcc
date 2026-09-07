@@ -188,6 +188,7 @@ export const applySystemPrompts = async (
         group: PatchGroup.SYSTEM_PROMPTS,
         applied: false,
         skipped: true,
+        skipKind: 'filter',
       });
       continue;
     }
@@ -212,11 +213,17 @@ export const applySystemPrompts = async (
           })`
         )
       );
+      // `failed`, not a skip: the prompt is neither switched off nor
+      // inapplicable to this version -- the INSTRUMENT gave out (V8's regex
+      // stack, #753) while the operator's text stayed out of the bundle. A
+      // circle here would read as "nothing was owed", which is a false report
+      // about the image the operator is running.
       results.push({
         id: promptId,
         name: prompt.name,
         group: PatchGroup.SYSTEM_PROMPTS,
         applied: false,
+        failed: true,
         details: 'regex too complex',
       });
       continue;
@@ -343,11 +350,16 @@ export const applySystemPrompts = async (
       }
 
       if (abortDetails) {
+        // The locator MATCHED and the write was refused to keep the bundle
+        // loadable (#900). Refusing is right, but the operator's outcome is a
+        // prompt that is not in the image and an .md that needs an edit -- a
+        // loud result, so it carries `failed` rather than a silent skip.
         results.push({
           id: promptId,
           name: prompt.name,
           group: PatchGroup.SYSTEM_PROMPTS,
           applied: false,
+          failed: true,
           details: abortDetails,
         });
         continue;
@@ -404,11 +416,16 @@ export const applySystemPrompts = async (
         details += ` (${matches.length} occurrences)`;
       }
 
+      // Tried and changed nothing is the same outcome the first producer calls
+      // `noop` (patches/index.ts): the replacement ran and left the bytes as
+      // they were. Without the label it prints the circle of a deliberate
+      // switch-off and is counted as one.
       results.push({
         id: promptId,
         name: prompt.name,
         group: PatchGroup.SYSTEM_PROMPTS,
         applied,
+        ...(!applied ? { skipped: true, skipKind: 'noop' as const } : {}),
         details,
       });
     } else {
@@ -437,6 +454,21 @@ export const applySystemPrompts = async (
       } catch {
         verbose(`  Partial match failed (regex truncation issue)`);
       }
+
+      // A locator that matched no site is an OUTCOME and needs a row. Pushing
+      // nothing dropped the prompt out of every count -- not applied, not
+      // skipped, not failed, simply absent -- and no filter over the results
+      // can name a row that was never created. `details` stays unset because
+      // the diagnostic detail is the console text above, and the first
+      // producer's `noop` carries none either.
+      results.push({
+        id: promptId,
+        name: prompt.name,
+        group: PatchGroup.SYSTEM_PROMPTS,
+        applied: false,
+        skipped: true,
+        skipKind: 'noop' as const,
+      });
     }
   }
 

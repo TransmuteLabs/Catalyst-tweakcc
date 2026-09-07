@@ -410,6 +410,9 @@ describe('systemPrompts.ts', () => {
       expect(result.results[0].applied).toBe(false);
       expect(result.results[0].details).toMatch(/stale identifier/i);
       expect(result.results[0].details).toContain('STALE_UPKEEP_FLAG');
+      // The refusal is loud, not quiet: the locator DID match, so the operator's
+      // .md needs an edit before its text can reach the bundle at all.
+      expect(result.results[0].failed).toBe(true);
     });
 
     it('should flag a single-word (no-underscore) stale identifier in a backtick interpolation (#900)', async () => {
@@ -771,6 +774,7 @@ describe('systemPrompts.ts', () => {
       expect(result.newContent).toBe(cliContent);
       expect(result.results[0].skipped).toBe(true);
       expect(result.results[0].applied).toBe(false);
+      expect(result.results[0].skipKind).toBe('filter');
     });
 
     it('should skip a prompt whose regex fails to compile instead of throwing', async () => {
@@ -792,6 +796,9 @@ describe('systemPrompts.ts', () => {
       expect(result.results).toHaveLength(1);
       expect(result.results[0].applied).toBe(false);
       expect(result.results[0].details).toContain('too complex');
+      // The instrument broke, not the patch: the prompt is neither switched off
+      // nor inapplicable, and the operator's setting never reached the bundle.
+      expect(result.results[0].failed).toBe(true);
     });
 
     it('should continue applying remaining prompts after one regex fails to compile', async () => {
@@ -827,6 +834,33 @@ describe('systemPrompts.ts', () => {
       expect(result.results[0].details).toContain('too complex');
       expect(result.results[1].id).toBe('good-prompt');
       expect(result.results[1].applied).toBe(true);
+    });
+
+    it('records a prompt whose locator matched no site instead of dropping it', async () => {
+      // A row that is never created cannot be enumerated by any filter over the
+      // array, so this branch is reachable only through a positive denominator:
+      // the length assertion below is the whole tooth, not decoration.
+      const mockPromptData = buildMockPromptData({
+        promptId: 'absent-prompt',
+        prompt: { name: 'Absent Prompt', content: 'Replacement text' },
+        regex: 'a site that this bundle does not carry',
+        getInterpolatedContent: () => 'Replacement text',
+        pieces: ['a site that this bundle does not carry'],
+      });
+
+      setupMocks(mockPromptData);
+
+      const cliContent = 'desc:"some content"';
+
+      const result = await applySystemPrompts(cliContent, '1.0.0', false);
+
+      expect(result.newContent).toBe(cliContent);
+      expect(result.results).toHaveLength(1);
+      expect(result.results[0].id).toBe('absent-prompt');
+      expect(result.results[0].applied).toBe(false);
+      expect(result.results[0].failed).toBeFalsy();
+      expect(result.results[0].skipped).toBe(true);
+      expect(result.results[0].skipKind).toBe('noop');
     });
   });
 
@@ -1108,6 +1142,141 @@ describe('systemPrompts.ts', () => {
       const { result } = await applyQuoted('use A\\\\Client;', '"');
       expect(result.results[0].applied).toBe(false);
       expect(result.results[0].details).toBe('unchanged');
+      expect(result.results[0].skipped).toBe(true);
+      expect(result.results[0].skipKind).toBe('noop');
+    });
+  });
+
+  describe('every outcome of applySystemPrompts names its own cause', () => {
+    // The sibling pin (skipKind.test.ts) measures applyPatchImplementations.
+    // The invariant belongs to the FIELD, not to one producer, so the second
+    // producer needs its own pin or the invariant holds only where it is read.
+    const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const UNCHANGED_SOURCE = 'A prompt body nobody edited';
+    const APPLIED_SOURCE = 'A prompt body the operator rewrote';
+
+    const buildPromptSet = () => {
+      // The .md a round trip produces from these pieces IS the baseline, which
+      // is what makes the fifth prompt below "uncustomized" rather than edited.
+      const unchangedBaseline = promptSync.reconstructContentFromPieces(
+        [UNCHANGED_SOURCE],
+        [],
+        {}
+      );
+      return [
+        buildMockPromptData({
+          promptId: 'filtered-prompt',
+          prompt: { name: 'Filtered Prompt', content: 'Filtered body' },
+          regex: escapeRegex('Filtered body'),
+          getInterpolatedContent: () => 'Filtered body EDITED',
+          pieces: ['Filtered body'],
+        }),
+        buildMockPromptData({
+          promptId: 'uncompilable-prompt',
+          prompt: { name: 'Uncompilable Prompt', content: 'unused' },
+          regex: '(',
+          getInterpolatedContent: () => 'unused',
+          pieces: ['unused'],
+        }),
+        buildMockPromptData({
+          promptId: 'stale-prompt',
+          prompt: {
+            name: 'Stale Prompt',
+            content: 'Memory ${HAS_UPKEEP_FN} ${STALE_UPKEEP_FLAG} tail',
+          },
+          regex: 'Memory \\$\\{([\\w$]+)\\} tail',
+          getInterpolatedContent: () =>
+            'Memory ${Q1} ${STALE_UPKEEP_FLAG} tail',
+          pieces: ['Memory ${', '} tail'],
+          identifiers: [1],
+          identifierMap: { '1': 'HAS_UPKEEP_FN' },
+        }),
+        buildMockPromptData({
+          promptId: 'absent-prompt',
+          prompt: { name: 'Absent Prompt', content: 'Replacement body' },
+          regex: 'a site that this bundle does not carry',
+          getInterpolatedContent: () => 'Replacement body',
+          pieces: ['a site that this bundle does not carry'],
+        }),
+        buildMockPromptData({
+          promptId: 'unchanged-prompt',
+          prompt: { name: 'Unchanged Prompt', content: unchangedBaseline },
+          regex: escapeRegex(UNCHANGED_SOURCE),
+          getInterpolatedContent: () => unchangedBaseline,
+          pieces: [UNCHANGED_SOURCE],
+        }),
+        buildMockPromptData({
+          promptId: 'applied-prompt',
+          prompt: { name: 'Applied Prompt', content: 'A rewritten body' },
+          regex: escapeRegex(APPLIED_SOURCE),
+          getInterpolatedContent: () => 'A rewritten body',
+          pieces: [APPLIED_SOURCE],
+        }),
+      ];
+    };
+
+    // Every prompt above is reachable in this one bundle: the filtered one is
+    // held back by the filter, not by an absent site.
+    const CLI_CONTENT = [
+      'a:"Filtered body"',
+      'b:`Memory ${Q1} tail`',
+      'c:"' + UNCHANGED_SOURCE + '"',
+      'd:"' + APPLIED_SOURCE + '"',
+    ].join(' ');
+
+    const PATCH_FILTER = [
+      'uncompilable-prompt',
+      'stale-prompt',
+      'absent-prompt',
+      'unchanged-prompt',
+      'applied-prompt',
+    ];
+
+    const runAllOutcomes = async () => {
+      const prompts = buildPromptSet();
+      vi.mocked(promptSync.loadSystemPromptsWithRegex).mockResolvedValue(
+        prompts
+      );
+      vi.mocked(systemPromptHashIndex.setAppliedHashes).mockResolvedValue();
+      const result = await applySystemPrompts(
+        CLI_CONTENT,
+        '1.0.0',
+        false,
+        PATCH_FILTER
+      );
+      return { result, prompts };
+    };
+
+    it('leaves no skipped result without a named cause', async () => {
+      const { result } = await runAllOutcomes();
+      const byId = Object.fromEntries(result.results.map(r => [r.id, r]));
+
+      // Positive control: an input that reached only one branch would satisfy
+      // the invariant below without ever testing it.
+      expect(byId['filtered-prompt']?.skipKind).toBe('filter');
+      expect(byId['unchanged-prompt']?.skipKind).toBe('noop');
+      expect(byId['absent-prompt']?.skipKind).toBe('noop');
+      expect(byId['uncompilable-prompt']?.failed).toBe(true);
+      expect(byId['stale-prompt']?.failed).toBe(true);
+      expect(byId['applied-prompt']?.applied).toBe(true);
+
+      const unlabelled = result.results.filter(
+        r => !r.applied && !r.failed && r.skipKind === undefined
+      );
+      expect(unlabelled).toEqual([]);
+    });
+
+    it('emits one result row per prompt it was handed', async () => {
+      const { result, prompts } = await runAllOutcomes();
+
+      // The denominator is the tooth for the branch that pushed nothing: a
+      // filtering assertion cannot name a row that was never created.
+      expect(prompts).toHaveLength(6);
+      expect(result.results).toHaveLength(6);
+      expect(result.results.map(r => r.id)).toEqual(
+        prompts.map(p => p.promptId)
+      );
     });
   });
 });
