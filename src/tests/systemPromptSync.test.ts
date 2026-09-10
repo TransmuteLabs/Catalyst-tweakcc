@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as fs from 'node:fs/promises';
+import * as path from 'path';
 import * as promptSync from '../systemPromptSync';
 import type { StringsPrompt, StringsFile } from '../systemPromptSync';
 
@@ -13,6 +14,11 @@ const createEnoent = () => {
   error.code = 'ENOENT';
   return error;
 };
+
+// readdir's mocked type binds to its withFileTypes overload; the code under
+// test calls the options-less form, which returns plain names.
+const asReaddirResult = (names: string[]) =>
+  names as unknown as Awaited<ReturnType<typeof fs.readdir>>;
 
 describe('promptSync.ts', () => {
   beforeEach(() => {
@@ -1754,30 +1760,304 @@ World`;
       pieces: ['Hello ', ' world, again'],
     } as unknown as StringsPrompt;
 
+    // The declared version's snapshot is seeded into the LOCAL cache, not
+    // into downloadStringsFile: deciding "did the user touch this?" reads
+    // only files already on disk and never goes to the network.
+    beforeEach(() => {
+      vi.clearAllMocks();
+      vi.resetModules();
+    });
+
     const arrange = async (body: string) => {
       vi.mocked(fs.access).mockResolvedValue(undefined);
-      vi.mocked(fs.readFile).mockResolvedValue(fileWith(body));
+      vi.mocked(fs.readFile).mockImplementation(async (p: unknown) => {
+        const file = String(p);
+        return file.endsWith('prompts-2.1.100.json')
+          ? JSON.stringify({ version: '2.1.100', prompts: [basePrompt] })
+          : fileWith(body);
+      });
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue(
+        asReaddirResult(['prompts-2.1.100.json'])
+      );
       const download = await import('../systemPromptDownload');
       vi.mocked(download.downloadStringsFile).mockResolvedValue({
         version: '2.1.100',
         prompts: [basePrompt],
       } as unknown as StringsFile);
+      return await import('../systemPromptSync');
     };
 
     it('upgrades an untouched file instead of calling it a conflict', async () => {
-      await arrange(shipped);
+      const freshSync = await arrange(shipped);
 
-      const result = await promptSync.syncPrompt(newer);
+      const result = await freshSync.syncPrompt(newer);
 
       expect(result.action).toBe('updated');
     });
 
     it('still reports a conflict when the body was actually edited', async () => {
-      await arrange(`${shipped} -- our own line`);
+      const freshSync = await arrange(`${shipped} -- our own line`);
 
-      const result = await promptSync.syncPrompt(newer);
+      const result = await freshSync.syncPrompt(newer);
+
+      expect(result.action).toBe('conflict');
+    });
+  });
+
+  describe('syncPrompt: untouched means the body matches ANY cached generation', () => {
+    // The generation cache is module state (the snapshot directory is parsed
+    // once per run), so every test here re-imports the module after a registry
+    // reset — the same pattern as searchPaths.test.ts.
+    beforeEach(() => {
+      vi.clearAllMocks();
+      vi.resetModules();
+    });
+
+    const P = (overrides: Partial<StringsPrompt>): StringsPrompt => ({
+      id: 'test-prompt',
+      name: 'Test Prompt',
+      description: 'd',
+      version: '2.1.100',
+      pieces: [],
+      identifiers: [],
+      identifierMap: {},
+      ...overrides,
+    });
+
+    // The overlay file exactly as writePromptFile leaves it: front matter,
+    // the body, the trailing newline gray-matter appends.
+    const fileWith = (ccVersion: string, body: string) =>
+      `<!--\nname: Test Prompt\ndescription: d\nccVersion: ${ccVersion}\n-->\n${body}\n`;
+
+    const arrange = async (opts: {
+      file: string;
+      // Snapshot file name -> snapshot JSON text: the local prompt-data-cache.
+      cache: Record<string, string>;
+      // What the hash index answers if it is consulted at all.
+      recordedHash?: string;
+    }) => {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockImplementation(async (p: unknown) => {
+        const name = path.basename(String(p));
+        return name in opts.cache ? opts.cache[name] : opts.file;
+      });
+      vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+      vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue(
+        asReaddirResult(Object.keys(opts.cache))
+      );
+      // Reset-modules does not clear mock implementations, so an earlier
+      // block's snapshot residue would leak into this fresh module. Pin the
+      // downloader to "offline": the pre-fix code swallows the rejection and
+      // falls to the hash index, the post-fix code never calls it.
+      const download = await import('../systemPromptDownload');
+      vi.mocked(download.downloadStringsFile).mockRejectedValue(
+        new Error('offline: snapshot not in local cache')
+      );
+      if (opts.recordedHash !== undefined) {
+        const hashIndex = await import('../systemPromptHashIndex');
+        vi.spyOn(hashIndex, 'getPromptHash').mockResolvedValue(
+          opts.recordedHash
+        );
+      }
+      return await import('../systemPromptSync');
+    };
+
+    // The generation an overlay file was actually written from. Subfamily 1
+    // lives here: upstream regenerates already-published snapshots and renames
+    // identifiers, so the DECLARED version's cached copy no longer describes
+    // the body the file was written from — but some other cached generation
+    // still does.
+    const oldGeneration = P({
+      version: '2.1.090',
+      pieces: ['Use tools via ${', '().run}'],
+      identifiers: [1],
+      identifierMap: { '1': 'OLD_TOOL' },
+    });
+    const oldBody = 'Use tools via ${OLD_TOOL().run}';
+
+    const regeneratedDeclared = P({
+      version: '2.1.100',
+      pieces: ['Use tools via ${', '().run}'],
+      identifiers: [1],
+      identifierMap: { '1': 'NEW_TOOL' },
+    });
+
+    const renamedCurrent = P({
+      version: '2.1.200',
+      pieces: ['Use tools via ${', '().run} and stay brief'],
+      identifiers: [1],
+      identifierMap: { '1': 'NEW_TOOL' },
+    });
+
+    it('upgrades a file written from a generation whose declared-version snapshot was regenerated (identifier renamed)', async () => {
+      const freshSync = await arrange({
+        file: fileWith('2.1.100', oldBody),
+        cache: {
+          'prompts-2.1.090.json': JSON.stringify({
+            version: '2.1.090',
+            prompts: [oldGeneration],
+          }),
+          'prompts-2.1.100.json': JSON.stringify({
+            version: '2.1.100',
+            prompts: [regeneratedDeclared],
+          }),
+        },
+        recordedHash: 'different-hash', // if the index were consulted: edited
+      });
+
+      const result = await freshSync.syncPrompt(renamedCurrent);
+
+      expect(result.action).toBe('updated');
+      const lastWrite = String(vi.mocked(fs.writeFile).mock.calls.at(-1)?.[1]);
+      expect(lastWrite).toBe(
+        freshSync.generateMarkdownFromPrompt(renamedCurrent)
+      );
+    });
+
+    it('upgrades a file whose piece form changed while the per-prompt version stayed put', async () => {
+      const minifiedGeneration = P({
+        version: '2.1.100',
+        pieces: ['Pick A ? `x` : `y` then stop'],
+      });
+      const expandedCurrent = P({
+        version: '2.1.100',
+        pieces: ['Pick A\n  ? `x`\n  : `y`\nthen stop'],
+      });
+      const freshSync = await arrange({
+        file: fileWith('2.1.100', 'Pick A ? `x` : `y` then stop'),
+        cache: {
+          'prompts-2.1.150.json': JSON.stringify({
+            version: '2.1.150',
+            prompts: [minifiedGeneration],
+          }),
+        },
+        recordedHash: 'different-hash',
+      });
+
+      const result = await freshSync.syncPrompt(expandedCurrent);
+
+      expect(result.action).toBe('updated');
+      const lastWrite = String(vi.mocked(fs.writeFile).mock.calls.at(-1)?.[1]);
+      expect(lastWrite).toBe(
+        freshSync.generateMarkdownFromPrompt(expandedCurrent)
+      );
+    });
+
+    it('keeps a hand-edited body out of the auto-upgrade when the version was raised', async () => {
+      const freshSync = await arrange({
+        file: fileWith('2.1.100', `${oldBody} -- our own line`),
+        cache: {
+          'prompts-2.1.090.json': JSON.stringify({
+            version: '2.1.090',
+            prompts: [oldGeneration],
+          }),
+        },
+        recordedHash: 'different-hash',
+      });
+
+      const result = await freshSync.syncPrompt(renamedCurrent);
+
+      expect(result.action).toBe('conflict');
+      expect(result.diffHtmlPath).toBeDefined();
+      const mdWrites = vi
+        .mocked(fs.writeFile)
+        .mock.calls.filter(c => String(c[0]).endsWith('test-prompt.md'));
+      const lastMdWrite = String(mdWrites.at(-1)?.[1]);
+      expect(lastMdWrite).toContain('-- our own line');
+      expect(lastMdWrite).not.toContain('stay brief');
+    });
+
+    it('skips a hand-edited body whose definition did not move (no conflict noise)', async () => {
+      const sameVersionCurrent = P({
+        version: '2.1.100',
+        pieces: ['Use tools via ${', '().run}'],
+        identifiers: [1],
+        identifierMap: { '1': 'OLD_TOOL' },
+      });
+      const freshSync = await arrange({
+        file: fileWith('2.1.100', `${oldBody} (tweaked)`),
+        cache: {
+          'prompts-2.1.090.json': JSON.stringify({
+            version: '2.1.090',
+            prompts: [oldGeneration],
+          }),
+        },
+        recordedHash: 'different-hash',
+      });
+
+      const result = await freshSync.syncPrompt(sameVersionCurrent);
+
+      expect(result.action).toBe('skipped');
+      const mdWrites = vi
+        .mocked(fs.writeFile)
+        .mock.calls.filter(c => String(c[0]).endsWith('test-prompt.md'));
+      const lastMdWrite = String(mdWrites.at(-1)?.[1]);
+      expect(lastMdWrite).toContain('(tweaked)');
+    });
+
+    it('recognizes the raw write era: escaped quotes, never decoded (pre-#921 files)', async () => {
+      const quotedGeneration = P({
+        version: '2.1.100',
+        pieces: ['Say \\"hi\\" today'],
+      });
+      const laterCurrent = P({
+        version: '2.1.200',
+        pieces: ['Say \\"hi\\" tomorrow'],
+      });
+      const freshSync = await arrange({
+        // The body keeps the backslashes: this file predates quote decoding.
+        file: fileWith('2.1.100', 'Say \\"hi\\" today'),
+        cache: {
+          'prompts-2.1.100.json': JSON.stringify({
+            version: '2.1.100',
+            prompts: [quotedGeneration],
+          }),
+        },
+        recordedHash: 'different-hash',
+      });
+
+      const result = await freshSync.syncPrompt(laterCurrent);
+
+      expect(result.action).toBe('updated');
+      const lastWrite = String(vi.mocked(fs.writeFile).mock.calls.at(-1)?.[1]);
+      expect(lastWrite).toBe(
+        freshSync.generateMarkdownFromPrompt(laterCurrent)
+      );
+    });
+
+    it('falls back to the hash index when the cache holds no generation: a match upgrades', async () => {
+      const freshSync = await arrange({
+        file: fileWith('2.1.100', 'Plain body'),
+        cache: {}, // the cache directory exists but holds no snapshots
+      });
+      const hashIndex = await import('../systemPromptHashIndex');
+      const parsed = freshSync.parseMarkdownPrompt(
+        fileWith('2.1.100', 'Plain body')
+      );
+      vi.spyOn(hashIndex, 'getPromptHash').mockResolvedValue(
+        hashIndex.computeMD5Hash(parsed.content)
+      );
+
+      const result = await freshSync.syncPrompt(
+        P({ version: '2.1.200', pieces: ['Plain body, new'] })
+      );
+
+      expect(result.action).toBe('updated');
+    });
+
+    it('falls back to the hash index when the cache holds no generation: a mismatch conflicts', async () => {
+      const freshSync = await arrange({
+        file: fileWith('2.1.100', 'Plain body'),
+        cache: {},
+        recordedHash: 'different-hash',
+      });
+
+      const result = await freshSync.syncPrompt(
+        P({ version: '2.1.200', pieces: ['Plain body, new'] })
+      );
 
       expect(result.action).toBe('conflict');
     });

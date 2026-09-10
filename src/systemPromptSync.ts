@@ -1,5 +1,6 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import matter from 'gray-matter';
 import { downloadStringsFile } from './systemPromptDownload';
 import {
@@ -8,7 +9,7 @@ import {
   computeMD5Hash,
 } from './systemPromptHashIndex';
 import chalk from 'chalk';
-import { SYSTEM_PROMPTS_DIR } from './config';
+import { SYSTEM_PROMPTS_DIR, PROMPT_CACHE_DIR } from './config';
 import { debug } from './utils';
 
 /**
@@ -236,12 +237,30 @@ export const reconstructContentFromPieces = (
   pieces: string[],
   identifiers: (number | string)[],
   identifierMap: Record<string, string>
+): string =>
+  gluePromptPieces(
+    pieces,
+    identifiers,
+    identifierMap,
+    isPlainTextPrompt(pieces, identifiers)
+  );
+
+/**
+ * Glues pieces and identifier names into prompt text. Whether quote escapes
+ * are decoded is the caller's era decision: the fork wrote pieces verbatim
+ * before #921 (the raw era) and decodes plain-text prompts since, so both
+ * forms of the same generation must stay reconstructable side by side.
+ */
+const gluePromptPieces = (
+  pieces: string[],
+  identifiers: (number | string)[],
+  identifierMap: Record<string, string>,
+  decodeQuotes: boolean
 ): string => {
   let result = '';
-  const decode = isPlainTextPrompt(pieces, identifiers);
 
   for (let i = 0; i < pieces.length; i++) {
-    result += decode ? decodeQuoteEscapes(pieces[i]) : pieces[i];
+    result += decodeQuotes ? decodeQuoteEscapes(pieces[i]) : pieces[i];
 
     // Add the identifier placeholder if there's a corresponding identifier
     if (i < identifiers.length) {
@@ -1008,6 +1027,118 @@ export const hasIdentifierDrift = (
 };
 
 /**
+ * MD5 over a trailing-normalized body, so "same body" can be checked as a
+ * hash set instead of resident strings. The live snapshot cache measures
+ * 206 MB across 127 files; holding every generation's text in both write
+ * eras would more than double that in memory. Hashes trade an md5 collision
+ * (astronomically unlikely at this scale, and already accepted by the hash
+ * index) for that footprint.
+ */
+const hashNormalizedBody = (body: string): string =>
+  crypto
+    .createHash('md5')
+    .update(normalizePromptBody(body), 'utf8')
+    .digest('hex');
+
+/**
+ * One cached snapshot's reconstruction of one prompt, as body hashes in both
+ * write eras the fork has ever produced (decoded since #921, raw before).
+ */
+interface CachedPromptGeneration {
+  decodedHash: string;
+  rawHash: string;
+}
+
+/**
+ * Body hashes for every generation of this prompt id that the local snapshot
+ * cache holds. The directory is parsed ONCE per run, lazily on first use:
+ * syncing hundreds of prompts would otherwise re-read and re-parse the whole
+ * cache for each one. Only files already downloaded under PROMPT_CACHE_DIR
+ * are read — nothing is fetched here (no downloadStringsFile).
+ */
+let cachedGenerationsByPromptId: Map<string, CachedPromptGeneration[]> | null =
+  null;
+
+const getCachedPromptGenerations = async (
+  promptId: string
+): Promise<CachedPromptGeneration[]> => {
+  if (cachedGenerationsByPromptId === null) {
+    const collected = new Map<string, CachedPromptGeneration[]>();
+    try {
+      const files = await fs.readdir(PROMPT_CACHE_DIR);
+      for (const file of files) {
+        if (!file.startsWith('prompts-') || !file.endsWith('.json')) continue;
+        try {
+          const parsed = JSON.parse(
+            await fs.readFile(path.join(PROMPT_CACHE_DIR, file), 'utf-8')
+          ) as StringsFile;
+          for (const p of parsed.prompts) {
+            const list = collected.get(p.id) ?? [];
+            list.push({
+              decodedHash: hashNormalizedBody(
+                reconstructContentFromPieces(
+                  p.pieces,
+                  p.identifiers,
+                  p.identifierMap
+                )
+              ),
+              rawHash: hashNormalizedBody(
+                gluePromptPieces(
+                  p.pieces,
+                  p.identifiers,
+                  p.identifierMap,
+                  false
+                )
+              ),
+            });
+            collected.set(p.id, list);
+          }
+        } catch {
+          // One unreadable snapshot removes only its own generations; the
+          // rest of the cache still answers.
+        }
+      }
+    } catch {
+      // A cache directory that cannot be listed contributes no generations
+      // at all; the caller falls back to the hash index.
+    }
+    cachedGenerationsByPromptId = collected;
+  }
+  return cachedGenerationsByPromptId.get(promptId) ?? [];
+};
+
+/**
+ * Parsed snapshots read on demand for conflict diffs, keyed by CC version.
+ * Bounded by the distinct declared versions of conflicted prompts (a few in
+ * practice — the untouched check exists to keep conflicts rare); each entry
+ * is one already-cached multi-megabyte JSON.
+ */
+const parsedSnapshotsByVersion = new Map<string, StringsFile>();
+
+const readCachedSnapshot = async (
+  ccVersion: string
+): Promise<StringsFile | null> => {
+  const memo = parsedSnapshotsByVersion.get(ccVersion);
+  if (memo) return memo;
+
+  let parsed: StringsFile;
+  try {
+    parsed = JSON.parse(
+      await fs.readFile(
+        path.join(PROMPT_CACHE_DIR, `prompts-${ccVersion}.json`),
+        'utf-8'
+      )
+    ) as StringsFile;
+  } catch {
+    // Not in the cache (or unreadable): the caller diffs against the user's
+    // own content rather than a phantom upstream baseline.
+    return null;
+  }
+  parsedSnapshotsByVersion.set(ccVersion, parsed);
+  return parsed;
+};
+
+/**
  * Syncs a single prompt file with the current CC version
  * Similar to ensurePromptFile in config.ts but with version tracking
  */
@@ -1039,115 +1170,129 @@ export const syncPrompt = async (
   // Always update variables list
   await updateVariables(prompt.id, prompt.identifierMap);
 
-  // Check version comparison
-  if (existingFile.ccVersion && prompt.version) {
-    const versionComparison = compareVersions(
-      existingFile.ccVersion,
-      prompt.version
-    );
+  // The body the current definition ships. A file that already equals it is
+  // up to date no matter what the version stamps say.
+  const currentBaseline = reconstructContentFromPieces(
+    prompt.pieces,
+    prompt.identifiers,
+    prompt.identifierMap
+  );
+  const existingBody = normalizePromptBody(existingFile.content);
 
-    // A matching version stamp usually means the file is up to date. But the
-    // extractor sometimes renames a prompt's interpolation identifiers without
-    // bumping the per-prompt version (#899), so also check for that drift and
-    // treat it like an upgrade; otherwise the stale identifiers get applied and
-    // inject an undefined variable into cli.js (#900).
-    const drifted =
-      versionComparison === 0 &&
-      hasIdentifierDrift(existingFile.content, prompt.identifierMap);
+  if (existingBody === normalizePromptBody(currentBaseline)) {
+    result.action = 'skipped';
+    return result;
+  }
 
-    if (versionComparison === 0 && !drifted) {
-      // Same version and no drift - already updated above
-      result.action = 'skipped';
-      return result;
-    }
+  // An overlay body is the fork's own output for SOME snapshot generation,
+  // so a human edit is a body that matches no generation available locally.
+  // Comparing only against the declared version cannot answer this: upstream
+  // regenerates already-published snapshots retroactively (identifier renames
+  // such as USE_EMBEDDED_TOOLS -> USE_EMBEDDED_TOOLS_FN, minified vs
+  // line-broken piece forms), so the locally cached copy of the declared
+  // version describes a generation the file was never written from.
+  // Measured 2026-09-10 on the live home: of 33 overlays diverging from the
+  // current definition, none carried a human edit (all were the fork's own
+  // output from snapshots 2.1.142-2.1.240); the declared-version comparison
+  // read 25 of them as edited (conflict, auto-upgrade dead) and never even
+  // looked at the other 8 (same version stamp, changed piece form).
+  const generations = await getCachedPromptGenerations(prompt.id);
+  const bodyHash = hashNormalizedBody(existingBody);
+  const matchesCachedGeneration = generations.some(
+    gen => gen.decodedHash === bodyHash || gen.rawHash === bodyHash
+  );
 
-    {
-      // The file is out of date: based on an older version, or on the same
-      // version but with drifted identifiers. Check if the user has modified it.
-      //
-      // Reconstruct what that version shipped and compare against it. The hash
-      // index alone cannot answer this: storeHashes() records a key only when
-      // it is absent ("first writer wins"), while the upstream snapshot for an
-      // already-recorded version gets regenerated with different interpolation
-      // identifier names -- so the stored hash keeps describing a snapshot
-      // generation the file was never written from. Measured 2026-08-30 across
-      // 847 local prompt files: the recorded hash matched NONE of them, which
-      // made isModified true for every file and left the auto-upgrade branch
-      // below unreachable. Every version bump then produced conflicts to
-      // resolve by hand for files nobody had touched.
-      //
-      // The index stays as the fallback for when the old snapshot cannot be
-      // fetched at all -- there, "assume modified" is the safe answer, because
-      // overwriting a real customization is worse than one spurious conflict.
-      let reconstructedBaseline: string | undefined;
-      try {
-        const oldStringsFile = await downloadStringsFile(
-          existingFile.ccVersion
-        );
-        const oldPrompt = oldStringsFile.prompts.find(p => p.id === prompt.id);
-
-        if (oldPrompt) {
-          reconstructedBaseline = reconstructContentFromPieces(
-            oldPrompt.pieces,
-            oldPrompt.identifiers,
-            oldPrompt.identifierMap
-          );
-        }
-      } catch {
-        console.log(
-          chalk.yellow(
-            `Warning: Could not fetch old version ${existingFile.ccVersion} for comparison. Using current file as baseline.`
-          )
-        );
-      }
-
-      let isModified: boolean;
-      if (reconstructedBaseline !== undefined) {
-        isModified =
-          normalizePromptBody(existingFile.content) !==
-          normalizePromptBody(reconstructedBaseline);
-      } else {
-        const oldHash = await getPromptHash(prompt.id, existingFile.ccVersion);
-        const currentHash = computeMD5Hash(existingFile.content);
-        isModified = !oldHash || oldHash !== currentHash;
-      }
-
-      if (isModified) {
-        // User has modified the file
-        result.action = 'conflict';
-
-        // Fall back to the user's own content when the old snapshot was
-        // unavailable: a diff against itself shows no phantom upstream change.
-        const oldBaselineContent =
-          reconstructedBaseline ?? existingFile.content;
-
-        // Get the new baseline content
-        const newBaselineContent = reconstructContentFromPieces(
-          prompt.pieces,
-          prompt.identifiers,
-          prompt.identifierMap
-        );
-
-        const markdownFilePath = getPromptFilePath(prompt.id);
-        const diffPath = await generateDiffHtml(
-          prompt.id,
-          prompt.name,
-          oldBaselineContent,
-          existingFile.content, // User's current content
-          newBaselineContent,
-          existingFile.ccVersion,
-          prompt.version,
-          markdownFilePath
-        );
-        result.diffHtmlPath = diffPath;
-      } else {
-        // User has NOT modified the file - automatically upgrade it
-        const newMarkdown = generateMarkdownFromPrompt(prompt);
-        await writePromptFile(prompt.id, newMarkdown);
-        result.action = 'updated';
-      }
+  let isModified: boolean;
+  if (matchesCachedGeneration) {
+    isModified = false;
+  } else if (generations.length > 0) {
+    // The cache knows this prompt, and no generation it holds produced this
+    // body: someone edited it by hand.
+    isModified = true;
+  } else {
+    // The cache holds no generation for this id at all (empty cache, or the
+    // snapshot files unreadable). The hash index alone cannot answer this:
+    // storeHashes() records a key only when it is absent ("first writer
+    // wins"), while the upstream snapshot for an already-recorded version
+    // gets regenerated with different interpolation identifier names -- so
+    // the stored hash keeps describing a snapshot generation the file was
+    // never written from. Measured 2026-08-30 across 847 local prompt files:
+    // the recorded hash matched NONE of them, which made isModified true for
+    // every file and left the auto-upgrade branch below unreachable. Every
+    // version bump then produced conflicts to resolve by hand for files
+    // nobody had touched. "Assume modified" stays the safe answer here,
+    // because overwriting a real customization is worse than one spurious
+    // conflict.
+    try {
+      const oldHash = await getPromptHash(prompt.id, existingFile.ccVersion);
+      const currentHash = computeMD5Hash(existingFile.content);
+      isModified = !oldHash || oldHash !== currentHash;
+    } catch {
+      // An index that cannot be read is an index with no record: assume
+      // modified rather than abort the sync.
+      isModified = true;
     }
   }
+
+  if (!isModified) {
+    // User has NOT modified the file - automatically upgrade it
+    const newMarkdown = generateMarkdownFromPrompt(prompt);
+    await writePromptFile(prompt.id, newMarkdown);
+    result.action = 'updated';
+    return result;
+  }
+
+  // A human edit. Only raise a conflict when upstream actually moved
+  // underneath it: a raised version, or identifiers drifted at the same
+  // version. The drift case matters because the extractor sometimes renames a
+  // prompt's interpolation identifiers without bumping the per-prompt version
+  // (#899); treating such an edit as up to date would let the stale
+  // identifiers be applied and inject an undefined variable into cli.js
+  // (#900). An edit against an unmoved, undrifted definition is a
+  // customization of the current text -- reporting it would be conflict noise
+  // on exactly the files nobody needs to resolve.
+  const versionRaised =
+    compareVersions(existingFile.ccVersion, prompt.version) < 0;
+  const drifted = hasIdentifierDrift(
+    existingFile.content,
+    prompt.identifierMap
+  );
+
+  if (versionRaised || drifted) {
+    result.action = 'conflict';
+
+    // Diff against what the declared version's cached snapshot ships for
+    // this prompt, when that snapshot is on disk; fall back to the user's
+    // own content otherwise, so the diff shows no phantom upstream change.
+    let oldBaselineContent = existingFile.content;
+    const declaredSnapshot = await readCachedSnapshot(existingFile.ccVersion);
+    const declaredPrompt = declaredSnapshot?.prompts.find(
+      p => p.id === prompt.id
+    );
+    if (declaredPrompt) {
+      oldBaselineContent = reconstructContentFromPieces(
+        declaredPrompt.pieces,
+        declaredPrompt.identifiers,
+        declaredPrompt.identifierMap
+      );
+    }
+
+    const newBaselineContent = currentBaseline;
+
+    const markdownFilePath = getPromptFilePath(prompt.id);
+    const diffPath = await generateDiffHtml(
+      prompt.id,
+      prompt.name,
+      oldBaselineContent,
+      existingFile.content, // User's current content
+      newBaselineContent,
+      existingFile.ccVersion,
+      prompt.version,
+      markdownFilePath
+    );
+    result.diffHtmlPath = diffPath;
+  }
+  // else: result stays 'skipped' - a user customization of the current text.
 
   return result;
 };
