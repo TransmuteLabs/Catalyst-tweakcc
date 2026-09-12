@@ -1341,10 +1341,25 @@ let globalCachedVersion: string | null = null;
  * Should be called once at app startup
  * Returns an object with success status and optional error message
  * @param version - Version string to preload
+ * @param options.ignoreLayerKnob - fetch even when the system prompt layer is
+ *   disabled. Reserved for paths where fetching IS the user's request
+ *   (--list-system-prompts), never for the automatic layer.
  */
 export const preloadStringsFile = async (
-  version: string
+  version: string,
+  options?: { ignoreLayerKnob?: boolean }
 ): Promise<{ success: boolean; errorMessage?: string }> => {
+  // The knob gates the download at its own home, not at each call site: a call
+  // site added later must inherit the disabled state rather than silently
+  // reopen the network dependency the knob exists to remove. Reported as
+  // success because nothing failed -- the layer is off by choice, and the two
+  // consumers of this result only use it to print a download error.
+  if (isSystemPromptLayerDisabled() && !options?.ignoreLayerKnob) {
+    globalStringsFile = null;
+    globalCachedVersion = null;
+    return { success: true };
+  }
+
   try {
     const stringsFile = await downloadStringsFile(version);
     globalStringsFile = stringsFile;
@@ -1928,4 +1943,26 @@ export const displaySyncResults = (summary: SyncSummary): void => {
     console.log(`  5. Delete the diff HTML files`);
     console.log();
   }
+};
+
+// A deployment that authors prompts elsewhere -- a Claude Code plugin editing
+// prompt.section / tool.describe / command.describe at runtime -- wants neither
+// half of this layer: no snapshot download and no overlay patch. The knob turns
+// BOTH halves off at once, because half-off states are the ones that mislead:
+// syncing overlays nobody writes back still drags the network dependency, and
+// patching without syncing writes a snapshot that has drifted.
+//
+// CONSTRAINT: the disabled state is ANNOUNCED on stdout, never silent. A
+// consumer reading this run's output must be able to tell "disabled on purpose"
+// from "the snapshot was unreachable" -- a silent skip makes an outage look
+// like a choice, and a zero counted after a skipped sync is a vacuous zero, not
+// a measured one.
+export const SYSTEM_PROMPT_LAYER_DISABLED_LINE =
+  'System prompt layer DISABLED by TWEAKCC_NO_SYSTEM_PROMPTS (no snapshot download, no overlay patch)';
+
+export const isSystemPromptLayerDisabled = (): boolean => {
+  const v = String(process.env.TWEAKCC_NO_SYSTEM_PROMPTS ?? '')
+    .trim()
+    .toLowerCase();
+  return !(v === '' || v === '0' || v === 'false' || v === 'off' || v === 'no');
 };

@@ -90,7 +90,10 @@ import {
   restoreNativeBinaryFromBackup,
   restoreClijsFromBackup,
 } from '../installationBackup';
-import { compareVersions } from '../systemPromptSync';
+import {
+  compareVersions,
+  isSystemPromptLayerDisabled,
+} from '../systemPromptSync';
 
 export { showDiff, showPositionalDiff, globalReplace } from './patchDiffing';
 export {
@@ -710,12 +713,17 @@ export const applyCustomization = async (
   // ==========================================================================
   // Apply system prompt customizations (has its own result format)
   // ==========================================================================
-  const systemPromptsResult = await applySystemPrompts(
-    content,
-    ccInstInfo.version,
-    undefined, // escapeNonAscii - auto-detect
-    patchFilter
-  );
+  // With the layer off the overlay patch is not merely skipped, it is not
+  // consulted at all: no results means no rows in the summary, so a reader
+  // counting applied prompts sees a true zero rather than a suppressed list.
+  const systemPromptsResult = isSystemPromptLayerDisabled()
+    ? { newContent: content, results: [] }
+    : await applySystemPrompts(
+        content,
+        ccInstInfo.version,
+        undefined, // escapeNonAscii - auto-detect
+        patchFilter
+      );
   content = systemPromptsResult.newContent;
 
   // Sort system prompt results alphabetically by name before adding

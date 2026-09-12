@@ -27,6 +27,7 @@ import { patchFailureSummaryLines } from './patchFailureSummary';
 import {
   preloadStringsFile,
   getSystemPromptDefinitions,
+  isSystemPromptLayerDisabled,
 } from './systemPromptSync';
 import { migrateConfigIfNeeded } from './migration';
 import { completeStartupCheck, startupCheck } from './startup';
@@ -455,8 +456,13 @@ async function handleApplyMode(
       }
     }
 
-    // Preload strings file for system prompts
-    console.log('Loading system prompts...');
+    // Preload strings file for system prompts. With the layer off the preload
+    // is a no-op, so the "Loading" line would contradict the disabled
+    // announcement printed at startup -- a reader of this output must not see
+    // both.
+    if (!isSystemPromptLayerDisabled()) {
+      console.log('Loading system prompts...');
+    }
     const preloadResult = await preloadStringsFile(ccInstInfo.version);
     if (!preloadResult.success) {
       console.log(chalk.red('\n✖ Error downloading system prompts:'));
@@ -697,7 +703,12 @@ async function handleListSystemPrompts(
 
   console.log(`Loading system prompts for CC version ${version}...`);
 
-  const preloadResult = await preloadStringsFile(version);
+  // --list-system-prompts asks for the snapshot itself, so it is the one path
+  // that fetches regardless of the layer knob: the flag must not silently
+  // print nothing when the automatic layer is off.
+  const preloadResult = await preloadStringsFile(version, {
+    ignoreLayerKnob: true,
+  });
   if (!preloadResult.success) {
     console.error(chalk.red(`\n✖ Error loading system prompts:`));
     console.error(chalk.red(`  ${preloadResult.errorMessage}`));

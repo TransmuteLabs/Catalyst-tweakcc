@@ -13,7 +13,12 @@ import {
   readConfigFile,
 } from './config';
 import { debug } from './utils';
-import { displaySyncResults, syncSystemPrompts } from './systemPromptSync';
+import {
+  SYSTEM_PROMPT_LAYER_DISABLED_LINE,
+  displaySyncResults,
+  isSystemPromptLayerDisabled,
+  syncSystemPrompts,
+} from './systemPromptSync';
 import {
   ClaudeCodeInstallationInfo,
   FindInstallationOptions,
@@ -74,12 +79,17 @@ export async function completeStartupCheck(
 
   // Sync system prompts with the current CC version
   if (ccInstInfo.version) {
-    try {
-      const syncSummary = await syncSystemPrompts(ccInstInfo.version);
-      displaySyncResults(syncSummary);
-    } catch {
-      // Error already logged with chalk.red in syncSystemPrompts
-      // Continue with startup check even if prompt sync fails
+    if (isSystemPromptLayerDisabled()) {
+      // Announced, never silent: see the constraint on the knob's home.
+      console.log(SYSTEM_PROMPT_LAYER_DISABLED_LINE);
+    } else {
+      try {
+        const syncSummary = await syncSystemPrompts(ccInstInfo.version);
+        displaySyncResults(syncSummary);
+      } catch {
+        // Error already logged with chalk.red in syncSystemPrompts
+        // Continue with startup check even if prompt sync fails
+      }
     }
   }
 
