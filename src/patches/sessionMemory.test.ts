@@ -193,4 +193,103 @@ describe('writeSessionMemory', () => {
     expect(result).toContain('Xe("tengu_bramble_lintel",null)??1.5,');
     expect(result).not.toContain('CC_SM_TOOL_CALLS_BETWEEN_UPDATES');
   });
+
+  // --- CC 2.1.270: the guard grew a `!pe&&` conjunct in front of the flag
+  // read and the anchor now appears twice (main path + CCR/MCP memory path).
+  // The gate statement is no longer excised: only the flag call is
+  // neutralized, so conjuncts the patch never read stay upstream-owned.
+  // The context slices below concatenate to verbatim bundle bytes.
+  it('neutralizes only the flag call on the 2.1.270 shape, keeping the statement and the !pe conjunct', () => {
+    const context270 =
+      '.some((Se)=>zt(Se,Mvr)))){t("[extractMemories] skipping (mcp) — CCR ' +
+      'memory server not mounted");return}if(!pe&&!H("tengu_passport_quail",' +
+      '!1))return;if(!pe&&!ra())return;if(Zn()!==null)return;if(d){t("[extr';
+    const input =
+      'D8({querySource:"extract_memories",forkLabel:"extract_memories"});' +
+      context270 +
+      'if(Wf("tengu_session_search_toggled",!1)){}';
+
+    const result = writeSessionMemory(input);
+
+    expect(result).not.toBeNull();
+    const out = result as string;
+    // the flag read became `!0` inside the kept statement, so the conjunct
+    // survives as `!pe&&!!0` (always false: the gate can never fire)
+    expect(out).toContain('if(!pe&&!!0)return;');
+    // the neighbouring guards must survive untouched
+    expect(out).toContain('if(!pe&&!ra())return;');
+    expect(out).toContain('if(Zn()!==null)return;');
+    expect(out).not.toContain('tengu_passport_quail');
+    // the CCR/MCP skip site sharing this window is not disturbed
+    expect(out).toContain('CCR memory server not mounted');
+  });
+
+  it('neutralizes only the flag call on the 2.1.267 shape (plain guard, still working)', () => {
+    const context267 =
+      'ystemMessage:Pe.appendSystemMessage,isTrailingRun:!0})}}async ' +
+      'function E(M,D){if(M.toolUseContext.agentId)return;if(!H(' +
+      '"tengu_passport_quail",!1))return;if(!ya())return;if(Gn()!==null)' +
+      'return;if(d){t("[extractMe';
+    const input =
+      'D8({querySource:"extract_memories",forkLabel:"extract_memories"});' +
+      context267 +
+      'if(Wf("tengu_session_search_toggled",!1)){}';
+
+    const result = writeSessionMemory(input);
+
+    expect(result).not.toBeNull();
+    const out = result as string;
+    expect(out).toContain('if(!!0)return;');
+    expect(out).toContain('if(!ya())return;');
+    expect(out).toContain('if(Gn()!==null)return;');
+    expect(out).toContain('if(M.toolUseContext.agentId)return;');
+    expect(out).not.toContain('tengu_passport_quail');
+  });
+
+  it('leaves the )return!1; flag consumer to the extract-mode rewrite (no false "reshaped")', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const input =
+      'D8({querySource:"extract_memories",forkLabel:"extract_memories"});' +
+      'if(!Qz("tengu_passport_quail",!1))return;' +
+      'function JXn(){if(!Ke("tengu_passport_quail",!1))return!1;return!un()||Ke("tengu_slate_thimble",!1)}' +
+      'if(Wf("tengu_session_search_toggled",!1)){}';
+
+    const result = writeSessionMemory(input);
+
+    expect(result).not.toBeNull();
+    const out = result as string;
+    // site 1 (`)return;` shape): neutralized in place, not excised
+    expect(out).toContain('if(!!0)return;');
+    // site 2 (`)return!1;` shape): still consumed by the extract-mode rewrite,
+    // which only matches the flag call it owns -- patchExtraction must not
+    // have touched it
+    expect(out).toContain(
+      'function JXn(){return!un()||Ke("tengu_slate_thimble",!1)}'
+    );
+    expect(out).not.toContain('tengu_passport_quail');
+    expect(errSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('extract-mode gate is present but reshaped')
+    );
+    errSpy.mockRestore();
+  });
+
+  it('refuses (failed to find extraction gate + null) when no flag call sits in a )return; statement', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // anchor present and the flag call present, but the enclosing statement
+    // is the extract-mode `)return!1;` shape: nothing may be accepted
+    const input =
+      'D8({querySource:"extract_memories",forkLabel:"extract_memories"});' +
+      'if(!pe&&!H("tengu_passport_quail",!1))return!1;' +
+      'if(Wf("tengu_session_search_toggled",!1)){}';
+
+    const result = writeSessionMemory(input);
+
+    expect(result).toBeNull();
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'patch: sessionMemory: failed to find extraction gate'
+      )
+    );
+    errSpy.mockRestore();
+  });
 });

@@ -53,6 +53,44 @@ const LEGACY_EXTRACTION_GATE =
 /**
  * Patch 1: Bypass tengu_session_memory flag check for extraction
  */
+
+// Index of the `)` that closes the `if(...)` condition enclosing position
+// `from`, or null when no enclosing `if(` exists. Walks left at zero relative
+// paren depth; a depth-zero `(` that is not `if(` is a non-if ancestor whose
+// match lies to the right and is simply passed through.
+const enclosingGuardCloseParen = (
+  file: string,
+  from: number
+): number | null => {
+  let depth = 0;
+  for (let i = from - 1; i >= 0; i--) {
+    const ch = file[i];
+    if (ch === ')') {
+      depth++;
+      continue;
+    }
+    if (ch !== '(') continue;
+    if (depth > 0) {
+      depth--;
+      continue;
+    }
+    const precededByIf =
+      file.slice(Math.max(0, i - 2), i) === 'if' &&
+      (i < 3 || !/[$\w]/.test(file[i - 3]));
+    if (!precededByIf) continue;
+    let guardDepth = 0;
+    for (let j = i; j < file.length; j++) {
+      if (file[j] === '(') guardDepth++;
+      else if (file[j] === ')') {
+        guardDepth--;
+        if (guardDepth === 0) return j;
+      }
+    }
+    return null;
+  }
+  return null;
+};
+
 const patchExtraction = (file: string): string | null => {
   const match = file.match(LEGACY_EXTRACTION_GATE);
 
@@ -68,22 +106,54 @@ const patchExtraction = (file: string): string | null => {
   }
 
   const anchor = 'querySource:"extract_memories",forkLabel:"extract_memories"';
-  const anchorIndex = file.indexOf(anchor);
 
-  if (anchorIndex !== -1) {
+  // 2.1.270 carries the anchor twice (the CCR/MCP memory path repeats it), so
+  // every occurrence gets its own 8000-char forward window; calls are deduped
+  // by index because the windows can overlap.
+  const acceptedCalls: Array<[number, number]> = [];
+  const seenCalls = new Set<number>();
+  let anchorIndex = file.indexOf(anchor);
+  while (anchorIndex !== -1) {
     const windowEnd = Math.min(file.length, anchorIndex + 8000);
     const window = file.slice(anchorIndex, windowEnd);
-    const gatePattern = /if\(![$\w]+\("tengu_passport_quail",!1\)\)return;/;
-    const gateMatch = window.match(gatePattern);
-
-    if (gateMatch && gateMatch.index !== undefined) {
-      const startIndex = anchorIndex + gateMatch.index;
-      const endIndex = startIndex + gateMatch[0].length;
-      const newFile = file.slice(0, startIndex) + file.slice(endIndex);
-
-      showDiff(file, newFile, '', startIndex, endIndex);
-      return newFile;
+    for (const call of window.matchAll(
+      /([$\w]+)\("tengu_passport_quail",!1\)/g
+    )) {
+      if (call.index === undefined) continue;
+      const callStart = anchorIndex + call.index;
+      if (seenCalls.has(callStart)) continue;
+      seenCalls.add(callStart);
+      // Only a call whose enclosing `if(...)` is a bare `return;` statement
+      // qualifies: the `)return!1;` shape belongs to the extract-mode gate
+      // consumed by the rewrite in writeSessionMemory, and touching it here
+      // would break that rewrite's own locator.
+      const guardClose = enclosingGuardCloseParen(file, callStart);
+      if (guardClose !== null && file.startsWith('return;', guardClose + 1)) {
+        acceptedCalls.push([callStart, callStart + call[0].length]);
+      }
     }
+    anchorIndex = file.indexOf(anchor, anchorIndex + 1);
+  }
+
+  if (acceptedCalls.length > 0) {
+    // Neutralize only the flag read, never the whole `if(...)return;`
+    // statement: excising it silently takes responsibility for conjuncts this
+    // patch never read (267 -> 270 grew `!pe&&` in front of the flag call).
+    // Same idiom as the extract-mode rewrite below -- only the flag gate is
+    // removed. Sites are patched back-to-front so earlier indices stay valid.
+    let newFile = file;
+    for (const [startIndex, endIndex] of acceptedCalls.sort(
+      (a, b) => b[0] - a[0]
+    )) {
+      const patchedFile =
+        newFile.slice(0, startIndex) + '!0' + newFile.slice(endIndex);
+      showDiff(newFile, patchedFile, '!0', startIndex, endIndex);
+      newFile = patchedFile;
+    }
+    console.log(
+      `patch: sessionMemory: neutralized ${acceptedCalls.length} extraction gate flag call(s)`
+    );
+    return newFile;
   }
 
   console.error('patch: sessionMemory: failed to find extraction gate');
@@ -307,7 +377,10 @@ export const writeSessionMemory = (oldFile: string): string | null => {
       extractModeMatch.index,
       extractModeMatch.index + extractModeMatch[0].length
     );
-  } else if (!usedLegacyExtraction && newFile.includes('"tengu_passport_quail"')) {
+  } else if (
+    !usedLegacyExtraction &&
+    newFile.includes('"tengu_passport_quail"')
+  ) {
     // The build still carries the flag but no longer wears this shape: the
     // force-on would silently not happen. Legacy builds have no such function at
     // all, so they are exempt rather than noisy.

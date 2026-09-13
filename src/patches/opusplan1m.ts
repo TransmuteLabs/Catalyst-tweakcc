@@ -12,6 +12,59 @@
 
 import { showDiff } from './index';
 
+// The plan-mode chooser's destructuring head, regex-verbatim from the previous
+// locator; measured to occur exactly once per build (2.1.267, 2.1.270).
+const planChooserHead =
+  /permissionMode\s*:[^}]{0,80}exceeds200kTokens[^}]{0,40}\}\s*=\s*[$\w]+\s*;/;
+
+const isIdentChar = (ch: string | undefined): boolean =>
+  ch !== undefined && /[$\w]/.test(ch);
+
+const startsKeyword = (file: string, at: number, keyword: string): boolean =>
+  file.startsWith(keyword, at) && !isIdentChar(file[at + keyword.length]);
+
+// True when the chooser calls `mapperName(...)` within 300 chars after its
+// destructuring head while staying inside the same function: brace depth never
+// goes negative (that would mean the chooser function was left) and no
+// `function`/`class`/`=>` boundary is crossed (that would borrow the call
+// from a nested one). The old `[^{}]{0,300}?` regex tail was a crude proxy
+// for this -- any object literal in the chooser's early return broke it
+// (2.1.270's `return{model:r,clampWarning:null}`) -- while the depth walk
+// states the same intent exactly.
+const planChooserCallsMapper = (file: string, mapperName: string): boolean => {
+  const head = file.match(planChooserHead);
+  if (!head || head.index === undefined) return false;
+
+  let depth = 0;
+  const from = head.index + head[0].length;
+  const limit = Math.min(file.length, from + 300);
+  for (let i = from; i < limit; i++) {
+    const ch = file[i];
+    if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth < 0) return false;
+    } else if (ch === '=' && file[i + 1] === '>') {
+      return false;
+    } else if (
+      !isIdentChar(file[i - 1]) &&
+      (startsKeyword(file, i, 'function') || startsKeyword(file, i, 'class'))
+    ) {
+      return false;
+    } else if (
+      !isIdentChar(file[i - 1]) &&
+      file.startsWith(mapperName, i) &&
+      /^\s*\(/.test(
+        file.slice(i + mapperName.length, i + mapperName.length + 8)
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+};
+
 /**
  * Patch 1: Fix the mode-switching function (bF) to recognize opusplan[1m]
  *
@@ -50,22 +103,14 @@ const patchModeSwitchingFunction = (oldFile: string): string | null => {
       /function\s+([$\w]+)\(\s*([$\w]+)\s*\)\s*\{\s*if\s*\(\s*\2\s*===\s*"opusplan"\s*\|\|\s*\2\s*===\s*"opusplan\[1m\]"\s*\)\s*return\s*"opus"\s*;/;
     const mapperMatch = oldFile.match(nativeAliasMapper);
     if (mapperMatch) {
-      const mapperName = mapperMatch[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      // From the destructuring's closing brace to the call: no braces allowed,
-      // so the call cannot be borrowed from a neighbouring function. A future
-      // chooser that puts a block between the two fails CLOSED here, which is
-      // the outcome this patch wants when it can no longer prove the wiring.
-      const nativePlanChooser = new RegExp(
-        'permissionMode\\s*:[^}]{0,80}exceeds200kTokens[^}]{0,40}\\}\\s*=\\s*[$\\w]+\\s*;' +
-          '[^{}]{0,300}?(?<![$\\w])' +
-          mapperName +
-          '\\s*\\('
-      );
+      // From the destructuring head to the call the walk must stay inside the
+      // chooser function; anything else fails CLOSED here, which is the
+      // outcome this patch wants when it can no longer prove the wiring.
+      const chooserOk = planChooserCallsMapper(oldFile, mapperMatch[1]);
       // `x==="opusplan[1m]"||...` — the test that picks the 1M variant of the
       // plan model. The mapper's own comparison is followed by `)`, never `||`,
       // so this cannot be satisfied by the mapper itself.
       const nativeOneMillionArm = /===\s*"opusplan\[1m\]"\s*\|\|/;
-      const chooserOk = nativePlanChooser.test(oldFile);
       const oneMillionOk = nativeOneMillionArm.test(oldFile);
       if (chooserOk && oneMillionOk) return oldFile;
 

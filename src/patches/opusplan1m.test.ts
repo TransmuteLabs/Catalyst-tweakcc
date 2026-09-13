@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { writeOpusplan1m } from './opusplan1m';
 
@@ -96,5 +96,97 @@ describe('writeOpusplan1m', () => {
     expect(broken).not.toBe(v251);
 
     expect(writeOpusplan1m(broken)).toBeNull();
+  });
+
+  // CC 2.1.270 rewrote the chooser's early return into an object literal
+  // (`return{model:r,clampWarning:null}`), which the old no-braces locator
+  // tail could not cross. The hp lines below use verbatim 2.1.270 bundle
+  // bytes; the mapper/arm scaffolding around them mirrors the 251 fixture.
+  const v270 = [
+    'function S7(e){if(e==="opusplan"||e==="opusplan[1m]")return"opus";return null}',
+    'function m3t(e){let t=S7(e);if(t===null)return null;let r=t==="opus"&&(e==="opusplan[1m]"||YS()),o=t==="opus"?r?Xe(bl()):bl():uf();return{model:o,clamp:"none"}}',
+    'function hp(e){let{permissionMode:n,mainLoopModel:r,exceeds200kTokens:s=!1}=e;if(n!=="plan")return{model:r,clampWarning:null};let d=km(),m=S7(d);if(m===null||m==="opus"&&s)return r;let _=m3t(d);if(_===null)return r;return _.model}',
+    'var M=["sonnet","opus","haiku","sonnet[1m]","opusplan"];',
+    'if(s==="opusplan")return"Opus in plan mode, else Sonnet";',
+    'if(s==="opusplan")return"Opus Plan";',
+    'function f(r,t){if(s===null||r.some((c)=>c.value===s))return WAt(r,t);',
+    'else if(s==="opusplan")return WAt([...r,Fcb()],t);',
+    'else return WAt(r,t)}',
+  ].join('');
+
+  // CC 2.1.267 shape for the same chooser: plain early return, no object
+  // literal. The hp head and first statements are verbatim 2.1.267 bytes.
+  const v267 = [
+    'function K8(e){if(e==="opusplan"||e==="opusplan[1m]")return"opus";return null}',
+    'function m3t(e){let t=K8(e);if(t===null)return null;let r=t==="opus"&&(e==="opusplan[1m]"||YS()),o=t==="opus"?r?Xe(bl()):bl():uf();return{model:o,clamp:"none"}}',
+    'function hp(e){let{permissionMode:n,mainLoopModel:r,exceeds200kTokens:o=!1}=e;if(n!=="plan")return r;let d=um(),p=K8(d);if(p===null||p==="opus"&&o)return r;let _=m3t(d);if(_===null)return r;return _.model}',
+    'var M=["sonnet","opus","haiku","sonnet[1m]","opusplan"];',
+    'if(s==="opusplan")return"Opus in plan mode, else Sonnet";',
+    'if(s==="opusplan")return"Opus Plan";',
+    'function f(r,t){if(s===null||r.some((c)=>c.value===s))return WAt(r,t);',
+    'else if(s==="opusplan")return WAt([...r,Fcb()],t);',
+    'else return WAt(r,t)}',
+  ].join('');
+
+  it('recognizes the 2.1.270 chooser despite the object-literal early return', () => {
+    const result = writeOpusplan1m(v270);
+
+    expect(result).not.toBeNull();
+    const out = result as string;
+    // the chooser is recognised as already native and survives untouched
+    expect(out).toContain(
+      'function hp(e){let{permissionMode:n,mainLoopModel:r,exceeds200kTokens:s=!1}=e;' +
+        'if(n!=="plan")return{model:r,clampWarning:null};let d=km(),m=S7(d);'
+    );
+    // and the five patches that are still needed did land
+    expect(out).toContain('"sonnet[1m]","opusplan","opusplan[1m]"');
+    expect(() => new Function(out)).not.toThrow();
+  });
+
+  it('still recognizes the 2.1.267 chooser with the plain early return', () => {
+    const result = writeOpusplan1m(v267);
+
+    expect(result).not.toBeNull();
+    const out = result as string;
+    expect(out).toContain(
+      'function hp(e){let{permissionMode:n,mainLoopModel:r,exceeds200kTokens:o=!1}=e;' +
+        'if(n!=="plan")return r;let d=um(),p=K8(d);'
+    );
+  });
+
+  it('refuses when the mapper call sits past the chooser function’s closing brace', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const broken = v270.replace(
+      'let d=km(),m=S7(d);if(m===null||m==="opus"&&s)return r;let _=m3t(d);if(_===null)return r;return _.model}',
+      'let d=km();if(d===null)return r}function xq(e){return S7(e)}'
+    );
+    expect(broken).not.toBe(v270);
+
+    expect(writeOpusplan1m(broken)).toBeNull();
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('the plan-mode chooser does not call it')
+    );
+    errSpy.mockRestore();
+  });
+
+  it('refuses a mapper call inside a nested function or arrow', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // arrow form: brace-free, so the old no-braces tail could not see this
+    // boundary at all -- the walk must reject it on the `=>` stop
+    const arrowNested = v267.replace('p=K8(d)', 'p=()=>K8(d)');
+    expect(arrowNested).not.toBe(v267);
+    expect(writeOpusplan1m(arrowNested)).toBeNull();
+
+    const fnNested = v267.replace(
+      'let d=um(),p=K8(d);',
+      'let d=um(),p=function(){return K8(d)};'
+    );
+    expect(fnNested).not.toBe(v267);
+    expect(writeOpusplan1m(fnNested)).toBeNull();
+
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('the plan-mode chooser does not call it')
+    );
+    errSpy.mockRestore();
   });
 });
