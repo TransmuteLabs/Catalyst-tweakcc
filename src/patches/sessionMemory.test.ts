@@ -16,7 +16,8 @@ describe('writeSessionMemory', () => {
       // new extraction path: anchor + passport_quail gate that patchExtraction strips
       'D8({querySource:"extract_memories",forkLabel:"extract_memories"});' +
       'if(!Qz("tengu_passport_quail",!1))return;' +
-      // extract-mode gate: the flag guard is dropped, the interactivity term stays
+      // extract-mode gate: the flag READ is neutralized, the guard statement
+      // and the interactivity term stay
       'function JXn(){if(!Ke("tengu_passport_quail",!1))return!1;return!un()||Ke("tengu_slate_thimble",!1)}' +
       // past-sessions fallback anchor (coral_fern gate already removed upstream)
       'if(Wf("tengu_session_search_toggled",!1)){}';
@@ -32,7 +33,7 @@ describe('writeSessionMemory', () => {
     // turned session memory on for print mode, background agents and SDK
     // sessions, which this feature never promised.
     expect(result).toContain(
-      'function JXn(){return!un()||Ke("tengu_slate_thimble",!1)}'
+      'function JXn(){if(!!0)return!1;return!un()||Ke("tengu_slate_thimble",!1)}'
     );
     expect(result).not.toContain('function JXn(){return!0}');
   });
@@ -264,10 +265,61 @@ describe('writeSessionMemory', () => {
     // which only matches the flag call it owns -- patchExtraction must not
     // have touched it
     expect(out).toContain(
-      'function JXn(){return!un()||Ke("tengu_slate_thimble",!1)}'
+      'function JXn(){if(!!0)return!1;return!un()||Ke("tengu_slate_thimble",!1)}'
     );
     expect(out).not.toContain('tengu_passport_quail');
     expect(errSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('extract-mode gate is present but reshaped')
+    );
+    errSpy.mockRestore();
+  });
+
+  // --- CC 2.1.270 also inserted an early return in FRONT of the extract-mode
+  // gate, which the old whole-body regex could not survive. The gate line below
+  // is verbatim 2.1.270 bundle bytes.
+  it('neutralizes the 2.1.270 extract-mode gate that no longer opens the function', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const input =
+      'D8({querySource:"extract_memories",forkLabel:"extract_memories"});' +
+      'if(!pe&&!I("tengu_passport_quail",!1))return;' +
+      'function bat(){if(f0e()!==null)return!0;if(!I("tengu_passport_quail",!1))' +
+      'return!1;return!ke()||I("tengu_slate_thimble",!1)}' +
+      'if(Wf("tengu_session_search_toggled",!1)){}';
+
+    const result = writeSessionMemory(input);
+
+    expect(result).not.toBeNull();
+    const out = result as string;
+    // upstream's own early return and escape hatch survive byte for byte
+    expect(out).toContain(
+      'function bat(){if(f0e()!==null)return!0;if(!!0)return!1;' +
+        'return!ke()||I("tengu_slate_thimble",!1)}'
+    );
+    expect(out).not.toContain('tengu_passport_quail');
+    expect(errSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('extract-mode gate is present but reshaped')
+    );
+    errSpy.mockRestore();
+  });
+
+  it('does not take a )return!1; flag guard from a function without the escape hatch', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const input =
+      'D8({querySource:"extract_memories",forkLabel:"extract_memories"});' +
+      'if(!Qz("tengu_passport_quail",!1))return;' +
+      // same guard shape, but this is not the extract-mode gate: no escape hatch
+      'function zz(){if(!Ke("tengu_passport_quail",!1))return!1;return!un()}' +
+      'if(Wf("tengu_session_search_toggled",!1)){}';
+
+    const result = writeSessionMemory(input);
+
+    expect(result).not.toBeNull();
+    const out = result as string;
+    // the foreign guard is left exactly as upstream wrote it
+    expect(out).toContain(
+      'function zz(){if(!Ke("tengu_passport_quail",!1))return!1;return!un()}'
+    );
+    expect(errSpy).toHaveBeenCalledWith(
       expect.stringContaining('extract-mode gate is present but reshaped')
     );
     errSpy.mockRestore();

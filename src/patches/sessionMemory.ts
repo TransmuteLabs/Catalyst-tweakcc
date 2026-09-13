@@ -91,6 +91,51 @@ const enclosingGuardCloseParen = (
   return null;
 };
 
+// True when `needle` occurs between `from` and the `}` that closes the block
+// containing `from`. Depth starts at zero and the scan stops at the first `}`
+// that would take it negative, so the search cannot leak past the end of the
+// enclosing function into an unrelated neighbour.
+const blockTailCarries = (
+  file: string,
+  from: number,
+  needle: string
+): boolean => {
+  let depth = 0;
+  for (let i = from; i < file.length; i++) {
+    const ch = file[i];
+    if (ch === '{') {
+      depth++;
+      continue;
+    }
+    if (ch === '}') {
+      if (depth === 0) return false;
+      depth--;
+      continue;
+    }
+    if (file.startsWith(needle, i)) return true;
+  }
+  return false;
+};
+
+// The index range of the extract-mode gate's own flag read: a
+// `X("tengu_passport_quail",!1)` call whose enclosing `if(...)` is followed by
+// exactly `return!1;` and whose function still carries the escape-hatch flag.
+// The `return;` shape belongs to patchExtraction and is passed over here, which
+// keeps the two sites from stealing each other.
+const findExtractModeFlagCall = (file: string): [number, number] | null => {
+  for (const call of file.matchAll(/([$\w]+)\("tengu_passport_quail",!1\)/g)) {
+    if (call.index === undefined) continue;
+    const guardClose = enclosingGuardCloseParen(file, call.index);
+    if (guardClose === null) continue;
+    if (!file.startsWith('return!1;', guardClose + 1)) continue;
+    if (!blockTailCarries(file, guardClose + 1, '"tengu_slate_thimble"')) {
+      continue;
+    }
+    return [call.index, call.index + call[0].length];
+  }
+  return null;
+};
+
 const patchExtraction = (file: string): string | null => {
   const match = file.match(LEGACY_EXTRACTION_GATE);
 
@@ -360,23 +405,29 @@ export const writeSessionMemory = (oldFile: string): string | null => {
   // verbatim from the match rather than re-spelled, so the minified names of the
   // interactivity helper and the escape-hatch flag reader cannot drift out from
   // under us.
-  const extractModePattern =
-    /(function [$\w]+\(\))\{if\(![$\w]+\("tengu_passport_quail",!1\)\)return!1;(return![$\w]+\(\)\|\|[$\w]+\("tengu_slate_thimble",!1\))\}/;
-  const extractModeMatch = newFile.match(extractModePattern);
-  if (extractModeMatch && extractModeMatch.index !== undefined) {
-    const replacement = `${extractModeMatch[1]}{${extractModeMatch[2]}}`;
+  //
+  // The locator used to be a single regex over the whole function body, which
+  // pinned two things it never needed: that the flag guard is the FIRST
+  // statement, and that the body holds nothing else. 2.1.270 took the site away
+  // with neither of those changing meaning -- it inserted an early return in
+  // front of the guard:
+  //
+  //   function bat(){if(f0e()!==null)return!0;
+  //                  if(!I("tengu_passport_quail",!1))return!1;
+  //                  return!ke()||I("tengu_slate_thimble",!1)}
+  //
+  // so the site is now found by structure (a flag read inside a guard that
+  // returns !1, in a function that still carries the escape hatch) and only the
+  // flag READ is neutralized. The guard statement, the new early return and the
+  // returned expression all stay upstream-owned byte for byte, which serves the
+  // carry-it-over-verbatim requirement above more strictly than re-spelling the
+  // body can.
+  const extractModeCall = findExtractModeFlagCall(newFile);
+  if (extractModeCall) {
+    const [startIndex, endIndex] = extractModeCall;
     const beforePatch = newFile;
-    newFile =
-      newFile.slice(0, extractModeMatch.index) +
-      replacement +
-      newFile.slice(extractModeMatch.index + extractModeMatch[0].length);
-    showDiff(
-      beforePatch,
-      newFile,
-      replacement,
-      extractModeMatch.index,
-      extractModeMatch.index + extractModeMatch[0].length
-    );
+    newFile = newFile.slice(0, startIndex) + '!0' + newFile.slice(endIndex);
+    showDiff(beforePatch, newFile, '!0', startIndex, endIndex);
   } else if (
     !usedLegacyExtraction &&
     newFile.includes('"tengu_passport_quail"')
