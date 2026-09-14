@@ -86,10 +86,12 @@ export const writeThinkingBlockStyling = (oldFile: string): string | null => {
     return null;
   }
 
-  // Replace match[2] (the "Component,null" part) with Text component and styling
+  // Replace match[2] (the "Component,null" part) with Text component and styling.
+  // Replacer function: textComponent is a bundle name that can contain `$`,
+  // which a replacement STRING would read as a control sequence.
   const replacement = match[0].replace(
     match[2],
-    `${textComponent},{dimColor:true,italic:true}`
+    () => `${textComponent},{dimColor:true,italic:true}`
   );
 
   const startIndex = match.index;

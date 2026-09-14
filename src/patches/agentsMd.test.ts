@@ -192,6 +192,33 @@ describe('agentsMd', () => {
 
         expect(result).toContain(JSON.stringify(altNames));
       });
+
+      // Bundle minified names regularly start with `$` (2.1.270: `$$t`), and
+      // `$` is a control character in String.replace REPLACEMENT strings, so
+      // the rename must not go through a plain string replacement.
+      it('keeps the renamed definition callable when the loader name starts with $', () => {
+        const readerDollarName =
+          'async function $$t(e,t,n,r){try{let o,s=!1;' +
+          'if(r){let i=await mYo(r);switch(i.kind){' +
+          'case"absent":return{info:null,includePaths:[]};' +
+          'case"error":return JKn(i.code,e),{info:null,includePaths:[]};' +
+          'case"skipped":s=i.isDirectory,o=null;break;' +
+          'case"content":o=i.content;break}}' +
+          'else{let i=yt();o=await Kg(i,e,Qze,(a)=>{s=a.isDirectory()})}' +
+          'if(o===null){b(`skip`);return{info:null,includePaths:[]}}' +
+          'return VKn(o,e,t,n)}catch(o){return fYo(o,e),{info:null,includePaths:[]}}}';
+
+        const result = writeAgentsMd(readerDollarName, altNames)!;
+
+        // both dollars survive into the renamed definition
+        expect(result).toContain('async function $$t$tw(');
+        // the name the wrapper calls is a name that is actually defined
+        const called = result.match(/try\{__r=await ([\w$]+)\(/)![1];
+        const defined = [...result.matchAll(/async function ([\w$]+)\(/g)].map(
+          m => m[1]
+        );
+        expect(defined).toContain(called);
+      });
     });
 
     it('should inject fallback at early return null when CLAUDE.md is missing', () => {

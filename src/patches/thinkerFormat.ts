@@ -140,8 +140,10 @@ export const writeThinkerFormat = (
   // See `getThinkerFormatLocation` for an explanation of this.
   const serializedFormat = format.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
   const curExpr = fmtLocation.identifiers?.[0];
+  // Replacer function: curExpr is a bundle expression that can contain `$`
+  // names, which a replacement STRING would read as a control sequence.
   const curFmt =
-    '`' + serializedFormat.replace(/\{\}/g, '${' + curExpr + '}') + '`';
+    '`' + serializedFormat.replace(/\{\}/g, () => '${' + curExpr + '}') + '`';
   const formatDecl = `=${curFmt}`;
 
   const newFile =

@@ -156,8 +156,15 @@ const writeCustomHighlighterImpl = (oldFile: string): string | null => {
   // First, find and patch the shimmer branch that runs BEFORE the main return.
   // Pattern: if(SEG.highlight.color)return REACT.createElement(TEXT,{key:KEY},SEG.text.split("").map(...))
   // We need to insert a typeof check before it so function colors don't get caught by shimmer.
+  //
+  // The escape must be GLOBAL. A string first argument to replace() rewrites
+  // only the FIRST match, so a two-dollar minified name like `$$t` came out as
+  // `\$$t` -- the second `$` stays a regex anchor in the middle of the pattern
+  // and the match becomes impossible, so this guard silently never inserts.
+  // Measured on 2.1.270, where the memory-file loader minified to `$$t`.
+  const escSeg = segVar.replace(/\$/g, '\\$');
   const shimmerPattern = new RegExp(
-    `if\\(${segVar.replace('$', '\\$')}\\.highlight\\.color\\)return ([$\\w]+)\\.createElement\\([$\\w]+,\\{key:[$\\w]+\\},${segVar.replace('$', '\\$')}\\.text\\.split\\(""\\)\\.map\\([^)]+\\)\\)`
+    `if\\(${escSeg}\\.highlight\\.color\\)return ([$\\w]+)\\.createElement\\([$\\w]+,\\{key:[$\\w]+\\},${escSeg}\\.text\\.split\\(""\\)\\.map\\([^)]+\\)\\)`
   );
 
   let workingFile = oldFile;
@@ -194,7 +201,12 @@ const writeCustomHighlighterImpl = (oldFile: string): string | null => {
   const styledText =
     `${segVar2}.highlight?.style?` +
     `${segVar2}.highlight.style(${segVar2}.text):${segVar2}.text`;
-  const styledInnerElem = innerElem2.replace(`${segVar2}.text`, styledText);
+  // Replacer function: styledText carries segVar2, a bundle name that can
+  // contain `$`, which a replacement STRING would read as a control sequence.
+  const styledInnerElem = innerElem2.replace(
+    `${segVar2}.text`,
+    () => styledText
+  );
   const augmentedRenderer =
     `return ${reactVar2}.createElement(${textComp2},{key:${keyVar2}` +
     `,color:${segVar2}.highlight?.style?void 0:${segVar2}.highlight?.color` +

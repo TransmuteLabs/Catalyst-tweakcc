@@ -66,8 +66,10 @@ const injectRerouteIntoCatch = (
   const newCatch = `catch(${catchVar}){${reroute}return ${errorHandler}(${catchVar},${pathParam}),{info:null,includePaths:[]}}`;
 
   let fn = m[0];
-  fn = fn.replace(oldSig, newSig);
-  fn = fn.replace(oldCatch, newCatch);
+  // Replacer functions: newSig/newCatch interpolate bundle identifiers that
+  // can carry `$`, which a replacement STRING would read as a control sequence.
+  fn = fn.replace(oldSig, () => newSig);
+  fn = fn.replace(oldCatch, () => newCatch);
 
   const endIndex = startIndex + m[0].length;
   const newFile = file.slice(0, startIndex) + fn + file.slice(endIndex);
@@ -155,9 +157,11 @@ const writeAgentsMdWrapper2233 = (
     `return __r||{info:null,includePaths:[]}}`;
 
   const startIndex = m.index;
+  // Replacer function, not a string: `inner` comes from the bundle and can
+  // contain `$`, which a replacement STRING would read as a control sequence.
   const renamedHead = head.replace(
     `async function ${funcName}(`,
-    `async function ${inner}(`
+    () => `async function ${inner}(`
   );
   const endIndex = startIndex + head.length;
   const newFile =

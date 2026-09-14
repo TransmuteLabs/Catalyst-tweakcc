@@ -402,7 +402,9 @@ const applyIndicatorPatchesListPatch = (
     `${reactVar}.createElement(${boxComponent}, null, ${reactVar}.createElement(${textComponent}, {color: "success", bold: true}, "┃ "), ${reactVar}.createElement(${textComponent}, {color: "success", bold: true}, "✓ tweakcc patches are applied")),`
   );
   for (let item of patchesApplies) {
-    item = item.replace('CHALK_VAR', chalkVar);
+    // Replacer function: chalkVar is a bundle name that can contain `$`,
+    // which a replacement STRING would read as a control sequence.
+    item = item.replace('CHALK_VAR', () => chalkVar);
     lines.push(
       `${reactVar}.createElement(${boxComponent}, null, ${reactVar}.createElement(${textComponent}, {color: "success", bold: true}, "┃ "), ${reactVar}.createElement(${textComponent}, {dimColor: true}, \`  * ${item}\`)),`
     );
@@ -640,7 +642,9 @@ export const writePatchesAppliedIndication = (
       const n7Fn = bannerMatch[2];
       const themeVar = bannerMatch[3];
       const newStr = `${bannerMatch[1]} \${${n7Fn}("warning",${themeVar})("+ tweakcc v${tweakccVersion}")} \`,`;
-      content = content.replace(oldStr, newStr);
+      // Replacer function: newStr interpolates bundle names that can contain
+      // `$`, which a replacement STRING would read as a control sequence.
+      content = content.replace(oldStr, () => newStr);
     }
 
     // Path B: SyK compact borderText — K6=N7("claude",e)(" Claude Code ")
@@ -811,7 +815,7 @@ export const writePatchesAppliedIndication = (
         `${jsxVar}.jsxs(${listBox},{children:[${jsxVar}.jsx(${textComponent},{color:"success",bold:true,children:"┃ "}),${jsxVar}.jsx(${textComponent},{color:"success",bold:true,children:"✓ tweakcc patches are applied"})]})`
       );
       for (let item of patchesApplies) {
-        if (chalkVar) item = item.replace('CHALK_VAR', chalkVar);
+        if (chalkVar) item = item.replace('CHALK_VAR', () => chalkVar);
         rows.push(
           `${jsxVar}.jsxs(${listBox},{children:[${jsxVar}.jsx(${textComponent},{color:"success",bold:true,children:"┃ "}),${jsxVar}.jsx(${textComponent},{dimColor:true,children:\`  * ${item}\`})]})`
         );
@@ -844,7 +848,7 @@ export const writePatchesAppliedIndication = (
         `${reactVar}.createElement(${boxComponent}, null, ${reactVar}.createElement(${textComponent}, {color: "success", bold: true}, "┃ "), ${reactVar}.createElement(${textComponent}, {color: "success", bold: true}, "✓ tweakcc patches are applied")),`
       );
       for (let item of patchesApplies) {
-        if (chalkVar) item = item.replace('CHALK_VAR', chalkVar);
+        if (chalkVar) item = item.replace('CHALK_VAR', () => chalkVar);
         lines.push(
           `${reactVar}.createElement(${boxComponent}, null, ${reactVar}.createElement(${textComponent}, {color: "success", bold: true}, "┃ "), ${reactVar}.createElement(${textComponent}, {dimColor: true}, \`  * ${item}\`)),`
         );

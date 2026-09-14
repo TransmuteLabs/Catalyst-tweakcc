@@ -541,6 +541,13 @@ export const escapeIdent = (ident: string): string => {
   return ident.replace(/\$/g, '\\$');
 };
 
+// `$` is a control character in a String.replace REPLACEMENT string (`$$`,
+// `$&`, `` $` ``, `$'`, `$1`…), and minified bundle identifiers regularly
+// contain it, so every value interpolated into a replacement string must pass
+// through here. This is the REPLACEMENT-string escape; escapeIdent above is
+// the REGEXP-PATTERN escape -- each breaks if used in the other's slot.
+export const replacementEsc = (s: string): string => s.replace(/\$/g, '$$$$');
+
 /**
  * Apply patches to content using the implementations map, tracking results.
  * @param patchFilter - Optional list of patch IDs to apply (if provided, only matching patches are applied)

@@ -317,7 +317,7 @@ export const writeUserMessageDisplay = (
       '#' +
       parts
         .slice(0, 3)
-        .map((n) => Math.min(255, Number(n)).toString(16).padStart(2, '0'))
+        .map(n => Math.min(255, Number(n)).toString(16).padStart(2, '0'))
         .join('')
     );
   };
@@ -345,8 +345,10 @@ export const writeUserMessageDisplay = (
   }
 
   // Replace {} in format string with the message variable
+  // Replacer function: messageVar is a bundle name that can contain `$`,
+  // which a replacement STRING would read as a control sequence.
   const formattedMessage =
-    '`' + config.format.replace(/\{\}/g, '${' + messageVar + '}') + '`';
+    '`' + config.format.replace(/\{\}/g, () => '${' + messageVar + '}') + '`';
 
   const textPropsPrefix = textProps.length > 0 ? `${textProps.join(',')},` : '';
   const textPropsObjStr =
