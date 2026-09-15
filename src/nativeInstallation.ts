@@ -155,6 +155,11 @@ const BUN_TRAILER = Buffer.from('\n---- Bun! ----\n');
 // Size constants for binary structures
 const SIZEOF_OFFSETS = 32;
 const NULL_TERMINATOR = Buffer.from([0]);
+// What a changed module's bytecode StringPointer is given: a zero-length blob,
+// which is how Bun spells "this module has no bytecode, compile its source".
+// The reason it must be zero-length for anything we edited is measured at the
+// single site that uses it (search NO_BYTECODE in rebuildBunData).
+const NO_BYTECODE = Buffer.alloc(0);
 const SIZEOF_STRING_POINTER = 8;
 // Module struct sizes vary by Bun version:
 // - Old format (pre-ESM bytecode, before Bun ~1.3.7): 4 StringPointers + 4 u8s = 36 bytes
@@ -1268,10 +1273,36 @@ function rebuildBunData(
       // terminator, including the empty ones.
       if (ptr.length > 0) arena.push(spanOf(ptr));
     };
+    const replacement = changed.get(index);
     take(NAME, module.name);
-    take(CONTENTS, module.contents, changed.get(index));
+    take(CONTENTS, module.contents, replacement);
     take(SOURCEMAP, module.sourcemap);
-    take(BYTECODE, module.bytecode);
+    // A changed module ships WITHOUT its bytecode, and that is a correctness
+    // requirement, not a size optimisation.
+    //
+    // MEASURED 2026-09-15 on claude 2.1.272 (bun 1.4.3), stock image, four arms
+    // on the same binary, each edit equal in length so no offset moved:
+    //   text edited, bytecode intact        -> the STOCK text ran
+    //   text edited, bytecode length zeroed -> the EDITED text ran
+    //   text untouched, bytecode zeroed     -> the stock text ran (zeroing is
+    //                                          inert on its own)
+    //   text untouched, contents LENGTH field halved
+    //                                       -> `SyntaxError: Unexpected end of
+    //                                          script`, i.e. bun compiled the
+    //                                          (truncated) source
+    // So the loader uses the blob exactly while the source LENGTH still matches
+    // the one the blob was compiled from; it never compares the text. An edit
+    // that keeps the length is therefore dead bytes at runtime while every
+    // check that scans the image for it reports success -- the silent-failure
+    // shape this repacker exists to prevent.
+    //
+    // Keeping the blob only worked here because every edit this pipeline makes
+    // happens to change its module's length (20 of 20 modules on 2.1.272). That
+    // is a property of today's edits, not a guarantee, and nothing asserted it.
+    // Dropping the blob removes the dependency on it entirely; the bytes are
+    // not lost to the image either -- the span returns to the free list below
+    // and is reused or blanked.
+    take(BYTECODE, module.bytecode, replacement ? NO_BYTECODE : undefined);
     if (moduleStructSize === SIZEOF_MODULE_NEW) {
       take(MODULE_INFO, module.moduleInfo);
       take(BYTECODE_ORIGIN_PATH, module.bytecodeOriginPath);
