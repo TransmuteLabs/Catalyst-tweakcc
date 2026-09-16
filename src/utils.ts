@@ -338,7 +338,7 @@ export async function replaceFileBreakingHardLinks(
   newContent: string | Buffer,
   operation: string = 'replace'
 ): Promise<void> {
-  // Get the original file's permissions before unlinking
+  // Get the original file's permissions before replacing
   let originalMode = 0o755; // Default fallback
   try {
     const stats = await fs.stat(filePath);
@@ -353,22 +353,33 @@ export async function replaceFileBreakingHardLinks(
     );
   }
 
-  // Unlink the file first to break any hard links
+  // Constraint: publish by writing a sibling temp file and renaming it into
+  // place, never by writing the target itself. The rename swaps the inode in
+  // one atomic step -- a concurrent reader sees the old or the new content,
+  // never a missing or partial file -- and other hard links keep the old
+  // inode, which is exactly the hard-link break this function is named for.
+  // The temp must sit in the target's own directory (rename across
+  // filesystems is not atomic) and carry pid + per-call uniqueness, so two
+  // runs racing on the same target never share a temp file.
+  const tempPath = `${filePath}.tmp.${process.pid}.${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
   try {
-    await fs.unlink(filePath);
-    debug(`[${operation}] Unlinked ${filePath} to break hard links`);
+    await fs.writeFile(tempPath, newContent);
+    // Constraint: the mode (executable bit included) must be on the temp
+    // file BEFORE the rename -- after publication the target must never
+    // exist in a not-yet-chmodded state.
+    await fs.chmod(tempPath, originalMode);
+    await fs.rename(tempPath, filePath);
   } catch (error) {
-    // File might not exist, which is fine
-    debug(`[${operation}] Could not unlink ${filePath}: ${error}`);
+    // Constraint: a failed publish must not leave a partial temp behind.
+    try {
+      await fs.unlink(tempPath);
+    } catch {
+      // the temp never got created
+    }
+    throw error;
   }
-
-  // Write the new content
-  await fs.writeFile(filePath, newContent);
-
-  // Restore the original permissions
-  await fs.chmod(filePath, originalMode);
   debug(
-    `[${operation}] Restored permissions to ${(originalMode & parseInt('777', 8)).toString(8)}`
+    `[${operation}] Published ${filePath} atomically, mode ${(originalMode & parseInt('777', 8)).toString(8)}`
   );
 }
 

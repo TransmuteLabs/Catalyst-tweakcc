@@ -3,6 +3,7 @@
  */
 
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
 import LIEF from 'node-lief';
 import { isDebug, debug } from './utils';
@@ -1456,26 +1457,56 @@ function atomicReplaceFile(
   }
 }
 
-function atomicWriteBinary(
+/**
+ * Builds a temp path beside the target for the rename-based publish.
+ */
+function uniqueTempPath(outputPath: string): string {
+  // Constraint: the temp must be a SIBLING of the target (rename across
+  // filesystems is not atomic) and carry pid + per-call uniqueness, so two
+  // tweakcc runs racing on the same target never share a temp file.
+  return `${outputPath}.tmp.${process.pid}.${Date.now()}-${crypto.randomBytes(6).toString('hex')}`;
+}
+
+export function atomicWriteBinary(
   binary: LIEF.ELF.Binary | LIEF.PE.Binary | LIEF.MachO.Binary,
   outputPath: string,
   originalPath: string,
   copyPermissions: boolean = true
 ): void {
-  const tempPath = outputPath + '.tmp';
-  binary.write(tempPath);
-  atomicReplaceFile(tempPath, outputPath, originalPath, copyPermissions);
+  const tempPath = uniqueTempPath(outputPath);
+  try {
+    binary.write(tempPath);
+    atomicReplaceFile(tempPath, outputPath, originalPath, copyPermissions);
+  } catch (error) {
+    // Constraint: a failed publish must not leave a partial temp behind.
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // the temp never got created
+    }
+    throw error;
+  }
 }
 
 /** Atomically write a raw binary buffer while retaining the original mode. */
-function atomicWriteBuffer(
+export function atomicWriteBuffer(
   content: Buffer,
   outputPath: string,
   originalPath: string
 ): void {
-  const tempPath = outputPath + '.tmp';
-  fs.writeFileSync(tempPath, content);
-  atomicReplaceFile(tempPath, outputPath, originalPath, true);
+  const tempPath = uniqueTempPath(outputPath);
+  try {
+    fs.writeFileSync(tempPath, content);
+    atomicReplaceFile(tempPath, outputPath, originalPath, true);
+  } catch (error) {
+    // Constraint: a failed publish must not leave a partial temp behind.
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // the temp never got created
+    }
+    throw error;
+  }
 }
 
 /**
