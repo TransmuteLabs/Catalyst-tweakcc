@@ -147,6 +147,72 @@ describe('writeUserMessageDisplay on a single-module bundle', () => {
   });
 });
 
+describe('the memoized-child site is identified by props, not by their count', () => {
+  // Measured on the pristine 2.1.276 image (usbox,
+  // ~/.local/share/claude/versions/2.1.276): the site is alive and carries a
+  // FOURTH prop, `awaitingModel`. The previous locator welded the closing brace
+  // onto a three-prop list, so it matched nothing -- and the miss printed as the
+  // inert sign, not as a failure. Both decoys below are real: they sit between
+  // the anchor and the site on that image, and both carry `text:`.
+  const owning =
+    'import{Aq as o,Bq as a,Cq as t,Dq as ch}from"/$bunfs/root/_1.js";' +
+    'function draw(){' +
+    'if(!wE)return(err(Error("No content found in user prompt message")),null);' +
+    'if(g1){let ps;if(Mm[6]!==_l)ps=o(HR,{text:_l}),Mm[6]=_l,Mm[7]=ps;else ps=Mm[7];return ps}' +
+    'if(g2){let ps;if(Mm[8]!==bm)' +
+    'ps=o(a,{flexDirection:"column",children:o(Ff,{text:_q,bodyOnly:!0,awaitingModel:bm})}),' +
+    'Mm[8]=bm,Mm[10]=ps;else ps=Mm[10];return ps}' +
+    'let Zy;if(Mm[14]!==wE||Mm[15]!==Pm)' +
+    'Zy=o(Ff,{text:wE,useBriefLayout:bm,timestamp:Pm,awaitingModel:am}),Mm[17]=Zy;else Zy=Mm[17];' +
+    'let zz=o(a,{flexDirection:"column",marginTop:1,children:Zy});' +
+    'let hint=o(t,{dimColor:!0,children:"hint"});ch.bold("x");return zz}';
+  const bundle = FOREIGN_CHUNK + BOUNDARY(1) + owning;
+
+  it('lands on a site carrying props beyond the three it used to pin', () => {
+    const out = writeUserMessageDisplay(bundle, CONFIG);
+    expect(out).not.toBeNull();
+    expect(out).not.toBe(bundle);
+    const injected = out!.slice(out!.indexOf('Zy=o('));
+    expect(injected).toContain('o(a,');
+    expect(injected).toContain('o(t,');
+  });
+
+  it('takes the message variable from the useBriefLayout call, not a decoy', () => {
+    // `_l` is the bare-text branch and `_q` the bodyOnly branch; both precede
+    // the real site and both spell `text:`. A locator keyed on `text:` alone
+    // would style the wrong message and leave the real one unpatched.
+    const out = writeUserMessageDisplay(bundle, CONFIG)!;
+    expect(out).toContain('${wE}');
+    expect(out).not.toContain('${_l}');
+    expect(out).not.toContain('${_q}');
+  });
+
+  it('leaves both decoy call sites byte-identical', () => {
+    const out = writeUserMessageDisplay(bundle, CONFIG)!;
+    expect(out).toContain('ps=o(HR,{text:_l})');
+    expect(out).toContain('o(Ff,{text:_q,bodyOnly:!0,awaitingModel:bm})');
+  });
+
+  it('returns null -- never the input -- when the site is gone', () => {
+    // The caller reads the sign off the BYTES: returning the input unchanged
+    // makes a dead locator print as `≡`, the sign reserved for a patch that
+    // deliberately has nothing to do on this version. That is what hid the
+    // 2.1.276 miss, so the direction of this tooth is the point of it.
+    const gone =
+      FOREIGN_CHUNK +
+      BOUNDARY(1) +
+      'import{Aq as o,Bq as a,Cq as t}from"/$bunfs/root/_1.js";' +
+      'function draw(){' +
+      'if(!wE)return(err(Error("No content found in user prompt message")),null);' +
+      'let Zy=o(Ff,{renamedAway:wE});' +
+      'let zz=o(a,{flexDirection:"column",children:Zy});' +
+      'let hint=o(t,{dimColor:!0,children:"hint"});return zz}';
+    const out = writeUserMessageDisplay(gone, CONFIG);
+    expect(out).toBeNull();
+    expect(out).not.toBe(gone);
+  });
+});
+
 describe('name resolution cannot be poisoned or mis-anchored', () => {
   const withOwning = (owning: string) => FOREIGN_CHUNK + BOUNDARY(1) + owning;
 

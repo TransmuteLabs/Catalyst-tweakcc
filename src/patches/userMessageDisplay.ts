@@ -153,8 +153,19 @@ export const writeUserMessageDisplay = (
   // no namespace in front of it -- accepted as a third callee form, tried last
   // so a namespaced call still wins where one exists. The prop set and the
   // "No content found" anchor are what identify the site; the callee never was.
+  //
+  // The prop set is matched by PRESENCE, never as a closed list. The earlier
+  // form pinned exactly `{text:V,useBriefLayout:V,timestamp:V}` with the closing
+  // brace welded on, and 2.1.276 added a fourth prop (`awaitingModel`) to that
+  // very call: the site was still there, the locator was not. Two props carry
+  // the identification -- `text` supplies the message variable, `useBriefLayout`
+  // separates this call from the two neighbouring `{text:...}` calls inside the
+  // same window (the bare-text branch and the bodyOnly branch), which is why one
+  // of them alone is not enough. `[^{}]` keeps the scan inside ONE object
+  // literal, so a nested `children:CALL(...,{...})` cannot satisfy the lookahead
+  // on behalf of its parent.
   const memoizedChildPattern =
-    /(No content found in user prompt message.{0,1200}?)([$\w]+)=([$\w]+(?:\.default)?\.(?:createElement|jsxs?)|[$\w]+)\([$\w]+,\{text:([$\w]+),useBriefLayout:[$\w]+,timestamp:[$\w]+\}\)/;
+    /(No content found in user prompt message.{0,1200}?)([$\w]+)=([$\w]+(?:\.default)?\.(?:createElement|jsxs?)|[$\w]+)\([$\w]+,\{(?=[^{}]*\buseBriefLayout:)[^{}]*?\btext:([$\w]+)[^{}]*\}\)/;
 
   const oldMatch = oldFile.match(pattern);
   const newMatch = oldMatch ? null : oldFile.match(newPattern);
@@ -166,7 +177,15 @@ export const writeUserMessageDisplay = (
     console.error(
       'patch: userMessageDisplay: failed to find user message display pattern'
     );
-    return oldFile;
+    // A miss must return null, never the input. The caller derives the sign from
+    // the BYTES (index.ts: `failed = result === null`, `applied = result !==
+    // content`, otherwise `skipKind:'noop'`), so returning the input unchanged
+    // prints the miss as `≡` -- the same sign a patch gets when it deliberately
+    // has nothing to do on this version. On 2.1.276 that made a dead locator
+    // indistinguishable from the intentional early returns in worktreeMode and
+    // mcpStartup, and the declaration door would have accepted it as inert.
+    // Every other refusal in this file already returns null.
+    return null;
   }
 
   let createElementFn: string;
