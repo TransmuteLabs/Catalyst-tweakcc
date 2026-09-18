@@ -9,6 +9,9 @@ type SandboxVars = Parameters<typeof runSandboxedScript>[2];
 // guarded property is an OS limit on a single argv element, which only a real
 // spawn exercises.
 
+// CONSTRAINT: каждая фикстура несёт `unresolved` явно, даже когда предмет ряда
+// в другом. Отсутствие списка -- не пустой список: песочница отказывается
+// запускать скрипт, когда резолвер не сказал, что осталось неразрешённым.
 describe('runSandboxedScript', () => {
   it('runs a payload bigger than every argv ceiling (3 MiB exceeds darwin ARG_MAX 1 048 576 and linux MAX_ARG_STRLEN 131 072)', async () => {
     const targetSize = 3_145_728;
@@ -21,7 +24,7 @@ describe('runSandboxedScript', () => {
     const result = await runSandboxedScript(
       script,
       'INPUT',
-      { marker: 'M' } as unknown as SandboxVars,
+      { marker: 'M', unresolved: [] } as unknown as SandboxVars,
       true
     );
 
@@ -53,7 +56,7 @@ describe('runSandboxedScript', () => {
     const result = await runSandboxedScript(
       script,
       input,
-      { label } as unknown as SandboxVars,
+      { label, unresolved: [] } as unknown as SandboxVars,
       true
     );
 
@@ -63,7 +66,46 @@ describe('runSandboxedScript', () => {
   it('rejects with the script error message when the script throws', async () => {
     const script = 'throw new Error("sandbox-canary-boom")';
     await expect(
-      runSandboxedScript(script, 'INPUT', {} as unknown as SandboxVars, true)
+      runSandboxedScript(
+        script,
+        'INPUT',
+        { unresolved: [] } as unknown as SandboxVars,
+        true
+      )
     ).rejects.toThrow('sandbox-canary-boom');
+  });
+
+  const unresolvedLoaderVars = {
+    chalkVar: 'c',
+    moduleLoaderFunction: undefined,
+    reactVar: 'r',
+    requireFuncName: 'require',
+    textComponent: 'T',
+    boxComponent: 'B',
+    unresolved: ['moduleLoaderFunction'],
+  } as SandboxVars;
+
+  it('fails a script that references an unresolved var, naming it in details', async () => {
+    await expect(
+      runSandboxedScript(
+        'return js + vars.moduleLoaderFunction;',
+        'INPUT',
+        unresolvedLoaderVars,
+        true
+      )
+    ).rejects.toMatchObject({
+      failed: true,
+      details: expect.stringContaining('moduleLoaderFunction'),
+    });
+  });
+
+  it('runs a script that does not reference the unresolved var', async () => {
+    const result = await runSandboxedScript(
+      'return js + vars.reactVar;',
+      'INPUT',
+      unresolvedLoaderVars,
+      true
+    );
+    expect(result).toBe('INPUTr');
   });
 });

@@ -4,6 +4,7 @@ import {
   clearReactVarCache,
   escapeNonAscii,
   findBoxComponent,
+  getModuleLoaderFunction,
   getReactModuleFunctionBun,
   getReactModuleNameNonBun,
   getReactVar,
@@ -147,5 +148,28 @@ describe('findBoxComponent', () => {
     expect(findBoxComponent('const x=1;function f(){return null}')).toBe(
       undefined
     );
+  });
+});
+
+describe('getModuleLoaderFunction', () => {
+  it('returns undefined and prints only to stderr when the loader is absent', () => {
+    const logs: unknown[][] = [];
+    const errs: unknown[][] = [];
+    const realLog = console.log;
+    const realError = console.error;
+    console.log = (...a: unknown[]) => void logs.push(a);
+    console.error = (...a: unknown[]) => void errs.push(a);
+    try {
+      expect(
+        getModuleLoaderFunction('const x = 1; function f(){ return x; }')
+      ).toBeUndefined();
+    } finally {
+      console.log = realLog;
+      console.error = realError;
+    }
+    expect(logs).toEqual([]);
+    expect(errs).toEqual([
+      ['patch: getModuleLoaderFunction: failed to find module loader function'],
+    ]);
   });
 });

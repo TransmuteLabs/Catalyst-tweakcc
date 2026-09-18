@@ -165,7 +165,8 @@ export const getModuleLoaderFunction = (
     return shortest;
   }
 
-  console.log(
+  // stdout carries the per-line outcome signs (✓✗⊘≡○); diagnostic text in that stream mixes with them.
+  console.error(
     'patch: getModuleLoaderFunction: failed to find module loader function'
   );
   return undefined;
@@ -291,7 +292,7 @@ export const getReactVar = (fileContents: string): string | undefined => {
 
   const moduleLoader = getModuleLoaderFunction(fileContents);
   if (!moduleLoader) {
-    console.log('^ patch: getReactVar: failed to find moduleLoader');
+    console.error('^ patch: getReactVar: failed to find moduleLoader');
     reactVarCache = undefined;
     return undefined;
   }
@@ -299,7 +300,7 @@ export const getReactVar = (fileContents: string): string | undefined => {
   // Try non-bun first (reactModuleNameNonBun)
   const reactModuleVarNonBun = getReactModuleNameNonBun(fileContents);
   if (!reactModuleVarNonBun) {
-    console.log('^ patch: getReactVar: failed to find reactModuleVarNonBun');
+    console.error('^ patch: getReactVar: failed to find reactModuleVarNonBun');
     reactVarCache = undefined;
     return undefined;
   }

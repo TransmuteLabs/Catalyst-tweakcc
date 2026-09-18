@@ -144,6 +144,8 @@ interface ResolvedVars {
   textComponent: string | undefined;
   /** The Ink Box component function name */
   boxComponent: string | undefined;
+  /** Names of the fields above whose resolver returned undefined. Empty if all resolved. */
+  unresolved: string[];
 }
 
 /**
@@ -152,19 +154,45 @@ interface ResolvedVars {
  */
 function resolveVars(content: string): ResolvedVars {
   clearCaches();
-  return {
-    chalkVar: findChalkVar(content),
-    moduleLoaderFunction: getModuleLoaderFunction(content),
-    reactVar: getReactVar(content),
-    requireFuncName: getRequireFuncName(content),
-    textComponent: findTextComponent(content),
-    boxComponent: findBoxComponent(content),
+  const chalkVar = findChalkVar(content);
+  const moduleLoaderFunction = getModuleLoaderFunction(content);
+  const reactVar = getReactVar(content);
+  const requireFuncName = getRequireFuncName(content);
+  const textComponent = findTextComponent(content);
+  const boxComponent = findBoxComponent(content);
+  const fields = {
+    chalkVar,
+    moduleLoaderFunction,
+    reactVar,
+    requireFuncName,
+    textComponent,
+    boxComponent,
   };
+  const unresolved = (
+    [
+      'chalkVar',
+      'moduleLoaderFunction',
+      'reactVar',
+      'requireFuncName',
+      'textComponent',
+      'boxComponent',
+    ] as const
+  ).filter(name => fields[name] === undefined);
+  return { ...fields, unresolved };
 }
 
 // =============================================================================
 // Sandboxed Script Execution
 // =============================================================================
+
+function unresolvedVarsReferenced(
+  script: string,
+  unresolved: string[]
+): string[] {
+  return unresolved.filter(name =>
+    new RegExp('\\bvars\\.' + name + '\\b').test(script)
+  );
+}
 
 /**
  * Executes a patch script in a sandboxed Node.js process.
@@ -199,6 +227,27 @@ export async function runSandboxedScript(
   vars: ResolvedVars,
   noSandbox = false
 ): Promise<string> {
+  // CONSTRAINT: отсутствие списка НЕ равно пустому списку. `?? []` читал бы
+  // «прибор не сказал, что неразрешено» как «неразрешённого нет» -- ровно тот
+  // fail-open, ради которого список и заводился.
+  if (!Array.isArray(vars.unresolved)) {
+    throw new Error(
+      'resolveVars did not report unresolved variables: refusing to run the script blind'
+    );
+  }
+  const referenced = unresolvedVarsReferenced(script, vars.unresolved);
+  if (referenced.length > 0) {
+    const details =
+      'unresolved variables referenced by script: ' + referenced.join(', ');
+    const err = new Error(details) as Error & {
+      failed: true;
+      details: string;
+    };
+    err.failed = true;
+    err.details = details;
+    throw err;
+  }
+
   const envelope = JSON.stringify({ script, vars }) + '\n' + inputCode;
 
   const wrapper = `
