@@ -664,14 +664,12 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   thinkingStyle: {
     updateInterval: 120,
-    phases:
-      // On Windows one of these can be an emoji with an ugly green background, which is likely the
-      // original cause of this conditional.
-      process.env.TERM === 'xterm-ghostty'
-        ? ['·', '✢', '✳', '✶', '✻', '*']
-        : process.platform === 'darwin'
-          ? ['·', '✢', '✳', '✶', '✻', '✽']
-          : ['·', '✢', '*', '✶', '✻', '✽'],
+    // One value on every platform and TERM: the thinker-symbol patch conditions compare
+    // the stored config against this default, so a per-platform default made one config
+    // patch the spinner on one machine and not on another (#385). A config equal to this
+    // value patches nothing, so each platform keeps Claude Code's own stock glyphs
+    // (upstream picks '*' off darwin, where '✳' can render as a green-background emoji).
+    phases: ['·', '✢', '✳', '✶', '✻', '✽'],
     reverseMirror: true,
   },
   userMessageDisplay: {
