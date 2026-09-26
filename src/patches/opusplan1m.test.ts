@@ -189,4 +189,72 @@ describe('writeOpusplan1m', () => {
     );
     errSpy.mockRestore();
   });
+
+  // CC 2.1.283 binds the 1M test to a flag instead of an inline `||` arm:
+  // `let r=e==="opusplan[1m]",...;g=r||yce(v)?...`. The mapper, o3n and s3n
+  // lines are verbatim 2.1.283 bundle bytes; the list/label scaffolding
+  // mirrors the 251 fixture.
+  const v283 = [
+    'function hce(e){if(e==="opusplan"||e==="opusplan[1m]")return"opus";if(e==="haiku")return"sonnet";return null}',
+    'function o3n(e){let n=hce(e);if(n===null||e===void 0||e===null)return null;let r=e==="opusplan[1m]",s=n==="opus"&&!r&&CB(),g;if(n==="opus"){let v=uu();g=r||yce(v)?je(v):v}else g=Kf();if((CI(g)??Vr(g))&&!c$(g,d$()))return{model:g,clamp:"none"};let b=Fb(n==="opus"?r||s?"opus[1m]":"opus":"sonnet");if(b!==null)return{model:s&&Ss(b)==="native"?Cx(b):b,clamp:"stepDown"};return{model:At(e),clamp:"resting"}}',
+    'function s3n(e){let{permissionMode:n,mainLoopModel:r,exceeds200kTokens:s=!1}=e;if(n!=="plan")return{model:r,clampWarning:null};let g=Mh(),h=hce(g);if(h===null||h==="opus"&&s)return{model:r,clampWarning:null};let b=o3n(g);if(b===null)return{model:r,clampWarning:null};return{model:b.model,clampWarning:null}}',
+    'var M=["sonnet","opus","haiku","sonnet[1m]","opusplan"];',
+    'if(s==="opusplan")return"Opus in plan mode, else Sonnet";',
+    'if(s==="opusplan")return"Opus Plan";',
+    'function f(r,t){if(s===null||r.some((c)=>c.value===s))return WAt(r,t);',
+    'else if(s==="opusplan")return WAt([...r,Fcb()],t);',
+    'else return WAt(r,t)}',
+  ].join('');
+
+  it('handles the 2.1.283 shape: the 1M test bound to a flag the chooser reads', () => {
+    const result = writeOpusplan1m(v283);
+
+    expect(result).not.toBeNull();
+    const out = result as string;
+    expect(out).toContain('let r=e==="opusplan[1m]",s=n==="opus"&&!r&&CB(),g;');
+    expect(out).toContain('"sonnet[1m]","opusplan","opusplan[1m]"');
+    expect(out).toContain('if(s==="opusplan[1m]")return"Opus Plan 1M";');
+    expect(() => new Function(out)).not.toThrow();
+  });
+
+  it('refuses the 2.1.283 shape when the flag is bound but never read', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const broken = v283
+      .replace('g=r||yce(v)?je(v):v', 'g=yce(v)?je(v):v')
+      .replace('r||s?"opus[1m]":"opus"', 's?"opus[1m]":"opus"');
+    expect(broken).not.toBe(v283);
+
+    expect(writeOpusplan1m(broken)).toBeNull();
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'nothing selects the 1M variant of the plan model'
+      )
+    );
+    errSpy.mockRestore();
+  });
+
+  it('refuses the 2.1.283 shape when the 1M test is gone from the flag', () => {
+    // the flag stays bound and read, only its literal changes: a locator that
+    // accepted any `flag=x==="..."` would pass this
+    const broken = v283.replace(
+      'let r=e==="opusplan[1m]",',
+      'let r=e==="opus",'
+    );
+    expect(broken).not.toBe(v283);
+
+    expect(writeOpusplan1m(broken)).toBeNull();
+  });
+
+  it('refuses a 2.1.283 flag read only after its function has closed', () => {
+    const broken = v283
+      .replace('g=r||yce(v)?je(v):v', 'g=yce(v)?je(v):v')
+      .replace('r||s?"opus[1m]":"opus"', 's?"opus[1m]":"opus"')
+      .replace(
+        'return{model:At(e),clamp:"resting"}}',
+        'return{model:At(e),clamp:"resting"}}function zq(){return r||q}'
+      );
+    expect(broken).not.toBe(v283);
+
+    expect(writeOpusplan1m(broken)).toBeNull();
+  });
 });

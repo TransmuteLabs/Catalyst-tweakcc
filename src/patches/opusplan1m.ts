@@ -65,6 +65,50 @@ const planChooserCallsMapper = (file: string, mapperName: string): boolean => {
   return false;
 };
 
+// The test that picks the 1M variant of the plan model. Two forms are known:
+// inline `x==="opusplan[1m]"||...` (2.1.251..2.1.282), and a bound flag
+// `let r=e==="opusplan[1m]",...;g=r||...` (2.1.283). The mapper's own
+// comparison is followed by `)`, never `||`, and binds nothing, so neither
+// form can be satisfied by the mapper itself. A bound flag counts only when
+// it is read as `flag||` before its function closes: a flag that is computed
+// and never consulted selects nothing.
+const inlineOneMillionArm = /===\s*"opusplan\[1m\]"\s*\|\|/;
+const boundOneMillionFlag =
+  /(?<![$\w.])([$\w]+)\s*=(?!=)\s*[$\w]+\s*===\s*"opusplan\[1m\]"\s*[,;]/g;
+
+const readsFlagWithOr = (file: string, from: number, flag: string): boolean => {
+  const orRead = /^\s*\|\|/;
+  let depth = 0;
+  const limit = Math.min(file.length, from + 600);
+  for (let i = from; i < limit; i++) {
+    const ch = file[i];
+    if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth < 0) return false;
+    } else if (
+      !isIdentChar(file[i - 1]) &&
+      file[i - 1] !== '.' &&
+      file.startsWith(flag, i) &&
+      !isIdentChar(file[i + flag.length]) &&
+      orRead.test(file.slice(i + flag.length, i + flag.length + 8))
+    ) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const selectsOneMillionPlanModel = (file: string): boolean => {
+  if (inlineOneMillionArm.test(file)) return true;
+  for (const m of file.matchAll(boundOneMillionFlag)) {
+    if (m.index === undefined) continue;
+    if (readsFlagWithOr(file, m.index + m[0].length, m[1])) return true;
+  }
+  return false;
+};
+
 /**
  * Patch 1: Fix the mode-switching function (bF) to recognize opusplan[1m]
  *
@@ -107,11 +151,7 @@ const patchModeSwitchingFunction = (oldFile: string): string | null => {
       // chooser function; anything else fails CLOSED here, which is the
       // outcome this patch wants when it can no longer prove the wiring.
       const chooserOk = planChooserCallsMapper(oldFile, mapperMatch[1]);
-      // `x==="opusplan[1m]"||...` — the test that picks the 1M variant of the
-      // plan model. The mapper's own comparison is followed by `)`, never `||`,
-      // so this cannot be satisfied by the mapper itself.
-      const nativeOneMillionArm = /===\s*"opusplan\[1m\]"\s*\|\|/;
-      const oneMillionOk = nativeOneMillionArm.test(oldFile);
+      const oneMillionOk = selectsOneMillionPlanModel(oldFile);
       if (chooserOk && oneMillionOk) return oldFile;
 
       console.error(
