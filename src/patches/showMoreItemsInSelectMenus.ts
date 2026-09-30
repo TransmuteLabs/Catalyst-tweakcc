@@ -100,7 +100,10 @@ const patchHelpMenuHeight = (file: string): MenuHeightOutcome => {
     /Math\.max\(1,Math\.floor\(\(([\w$]+)-([\w$]+)\)\/([\w$]+)\)\)/g;
   let fitMatch: RegExpExecArray | null;
   while ((fitMatch = fitPattern.exec(file)) !== null) {
-    const nearby = file.slice(Math.max(0, fitMatch.index - 250), fitMatch.index);
+    const nearby = file.slice(
+      Math.max(0, fitMatch.index - 250),
+      fitMatch.index
+    );
     if (nearby.includes('"expanded"?3') && nearby.includes('"compact"?1:2')) {
       return { kind: 'notApplicable' };
     }
@@ -208,7 +211,10 @@ export const writeShowMoreItemsInSelectMenus = (
   const heightOutcome = patchHelpMenuHeight(newFile);
   if (heightOutcome.kind === 'patched') {
     newFile = heightOutcome.file;
-  } else if (heightOutcome.kind === 'unknown' && !hasCommandsFitFormula(newFile)) {
+  } else if (
+    heightOutcome.kind === 'unknown' &&
+    !hasCommandsFitFormula(newFile)
+  ) {
     console.error(
       'patch: writeShowMoreItemsInSelectMenus: failed to find help menu height pattern'
     );

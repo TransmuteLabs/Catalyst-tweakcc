@@ -1,5 +1,5 @@
 import { escapeIdent } from '.';
-import { MODULE_BOUNDARY_SPLIT_RE } from '../nativeInstallation';
+import { MODULE_BOUNDARY_SPLIT_RE } from '../moduleBoundary';
 
 /**
  * The half-open range of the bundle module that `position` falls in.

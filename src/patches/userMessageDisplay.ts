@@ -6,7 +6,7 @@ import {
   moduleSliceAround,
   showDiff,
 } from './index';
-import { MODULE_BOUNDARY_SPLIT_RE } from '../nativeInstallation';
+import { MODULE_BOUNDARY_SPLIT_RE } from '../moduleBoundary';
 import { UserMessageDisplayConfig } from '../types';
 
 /**

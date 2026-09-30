@@ -44,7 +44,9 @@ describe('writeShowMoreItemsInSelectMenus', () => {
     expect(out).toContain('Math.max(1,Math.floor((kp-Rs)/Cp))');
     expect(out).not.toContain('Math.max(1,kp-Rs)');
     // Everything except the default is byte-identical.
-    expect(out).toBe(FIT_246.replace('visibleOptionCount:e=5', 'visibleOptionCount:e=25'));
+    expect(out).toBe(
+      FIT_246.replace('visibleOptionCount:e=5', 'visibleOptionCount:e=25')
+    );
   });
 
   it('leaves the commands dialog fit formula alone', () => {

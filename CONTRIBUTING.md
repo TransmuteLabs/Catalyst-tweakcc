@@ -52,7 +52,59 @@ pnpm format
 pnpm prettier --check src
 ```
 
-**Pre-commit hooks** are configured via Husky and lint-staged to automatically format staged files before commit.
+**Pre-commit hook** (`.husky/pre-commit`) runs no project tooling on the
+committing machine. `scripts/run-witness.sh` executes checks on `usbox` against
+a snapshot of the staged tree, never against the working tree. Both modes
+include a whole-project typecheck:
+
+- **related**: ESLint on changed TypeScript files under `src/`,
+  `prettier --check` on changed TypeScript, JSON and Markdown files, and
+  `vitest related --run` on changed files under `src/`.
+- **full**: `eslint src`, `vitest run`, and `prettier --check --ignore-unknown`
+  on the union of tracked ordinary files under `src/` and tracked ordinary
+  files matching the snapshot's `package.json` lint-staged globs.
+  `.prettierignore` remains in effect; symlinks are not separate formatter inputs.
+
+The shared [trigger table](scripts/witness-rules.sh) is the only home of the
+installation inputs and full-mode configuration triggers. Deletions and Git
+typechanges under `src/`, and renames/copies involving `src/`, also require full. A
+full witness covers related changes; a related witness does not cover full
+changes.
+
+The hook only verifies the resulting _witness_ file
+(`<git-dir>/tweakcc-witness/<tree>`: `files=…`, `rc=0`, `host=usbox`,
+`mode=related|full`). The changed paths stay in Git order, separated by commas;
+percent, comma, LF, CR and TAB bytes are encoded as `%25`, `%2C`, `%0A`, `%0D`
+and `%09`. New names (A and R/C targets) containing commas or LF are refused;
+existing names can be represented and deleted. Names that cannot roundtrip
+through UTF-8 are refused with `ФАЙЛЫ_НЕ_UTF8` when passed to Node checks;
+deleting such a name is permitted because it is absent from the staged tree.
+The witness is self-signed: like the Catalyst pattern it borrows, the file
+proves a run happened, not who ran it. Produce the witness for your staged
+changes before committing:
+
+```bash
+bash scripts/run-witness.sh                # current index
+bash scripts/run-witness.sh --tree <tree> --files <list>   # named tree
+```
+
+The hook refuses when the witness is missing, was produced for another staged
+tree or file list, or is red, and prints the exact command to produce it.
+The recipe starts with `cd` to the repository root and works from a subdirectory.
+
+Producers for one tree share a kernel `flock` on the open description of fd 9
+at `<git-dir>/tweakcc-witness/<tree>.lock`, using Perl on both platforms.
+A competing producer refuses with `ЗАМОК_ЗАНЯТ` (exit 8); no owner reaping occurs.
+Releasing a lock only closes fd 9 and leaves its file in place. A surviving
+descendant keeps that tree busy while it holds fd 9 open. Measured: an OpenSSH
+9.9 multiplexing master (`ControlPersist`) closes inherited descriptors and
+does not keep the tree busy.
+Age cleanup excludes lock files from `find`; it removes an old lock file only
+under a fresh description's own nonblocking `flock`, after matching the inode.
+Replacing a path between open and acquisition causes a retry, limited to eight
+attempts; a leftover directory lock requires the printed manual removal command.
+
+The hook is tested under Bash 5.2 and Bash 3.2 `--posix`; `/bin/sh` on Mac and usbox is Bash; dash has not been tested.
 
 ### TypeScript Best Practices
 

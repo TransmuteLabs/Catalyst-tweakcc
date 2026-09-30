@@ -7,6 +7,9 @@ import crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
 import LIEF from 'node-lief';
 import { isDebug, debug } from './utils';
+// CONSTRAINT: MODULE_BOUNDARY_SPLIT_RE живёт в листе ./moduleBoundary:
+// статический импорт её отсюда подтягивал node-lief каждому патчу.
+import { MODULE_BOUNDARY_SPLIT_RE } from './moduleBoundary';
 
 // ============================================================================
 // Nix binary wrapper detection
@@ -380,17 +383,6 @@ function collectBundleModules(
 function moduleBoundary(index: number): string {
   return `\n/*__tweakcc_module_boundary_${index}__*/\n`;
 }
-
-/**
- * The marker `moduleBoundary()` writes, as a matcher. Exported because patches
- * need it too: identifiers in a code-split bundle are module-scoped, so a patch
- * that emits a reference to one has to prove the reference and its target sit
- * between the same pair of markers. Anyone matching the marker must use this
- * constant rather than retyping the literal -- a second copy would keep matching
- * silently after the marker changed.
- */
-export const MODULE_BOUNDARY_SPLIT_RE =
-  /\n\/\*__tweakcc_module_boundary_(\d+)__\*\/\n/;
 
 /** Indices of the bundle modules, in module-table order. */
 function collectBundleModuleIndices(

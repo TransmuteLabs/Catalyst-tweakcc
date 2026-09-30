@@ -1,3 +1,154 @@
-pnpm exec lint-staged
-pnpm run lint
-pnpm run test
+#!/usr/bin/env bash
+# Дверь коммита tweakcc: хук ничего не исполняет на этой машине -- только
+# сверяет СВИДЕТЕЛЬ прогона проверок, произведённый scripts/run-witness.sh на
+# usbox по снимку дерева.
+#
+# CONSTRAINT: единственное доказательство -- файл свидетеля; команда его
+# производства печатается при каждом отказе.
+#
+# CONSTRAINT: свидетель ищется по дереву T = git write-tree и ТОЧНОМУ списку
+# staged-файлов: дверь заявляет ровно то, что коммитит. Список -- изменённые
+# пути индекса против HEAD (весь индекс при первом коммите) в порядке git,
+# percent-кодированные по witness-rules.sh и склеенные запятыми. Запятая/LF
+# запрещены только в новых именах A и целях R/C. Список и режим обязаны быть теми же,
+# что в scripts/run-witness.sh: расхождение ломает сверку молча.
+#
+# CONSTRAINT: свидетель -- РОВНО четыре строки files=…, rc=0, host=usbox,
+# mode=related|full. Режим FULL (прогон всех проверок) требуется при: удалении
+# или переименовании под src/, правке конфигов сборки/инструментов, правке
+# src/tests/setup/**. Свидетель режима full годится и для related (тот прогон
+# поглотил наш); наоборот -- нет: непрогнанное не считается зелёным.
+#
+# CONSTRAINT: git-dir берётся rev-parse'ом, а не литерой .git: в worktree
+# git-каталог лежит вне рабочего дерева, и свидетель обязан лежать там же,
+# где его кладёт scripts/run-witness.sh.
+#
+# CONSTRAINT: недоступный прибор -- отказ, не тихий пропуск: пустой результат
+# без прибора не равен нулю находок.
+#
+# CONSTRAINT: хук исполняется и оболочкой 3.2.57 в posix-режиме (площадка
+# коммита) -- без массивов и прочего, чего 3.2 не умеет.
+set -u
+fail() { printf 'дверь коммита: ОТКАЗ %s\n' "$1" >&2; exit 1; }
+
+FL=""; MSH=""; IDXSNAP=""
+door_cleanup_error() { printf 'дверь коммита: ОТКАЗ УБОРКА: %s\n' "$1" >&2; CLEAN_RC=1; }
+door_clean() {
+  local rc=$?
+  CLEAN_RC=0
+  if [ -n "$FL" ]; then rm -f "$FL" || door_cleanup_error "$FL"; fi
+  if [ -n "$MSH" ]; then rm -f "$MSH" || door_cleanup_error "$MSH"; fi
+  if [ -n "$IDXSNAP" ]; then rm -f "$IDXSNAP" || door_cleanup_error "$IDXSNAP"; fi
+  [ "$CLEAN_RC" = 0 ] || rc=1
+  exit "$rc"
+}
+trap door_clean EXIT
+
+command -v git >/dev/null || fail "ПРИБОР_НЕДОСТУПЕН: git"
+top=$(git rev-parse --show-toplevel) || fail "ПРИБОР_НЕДОСТУПЕН: git rev-parse --show-toplevel"
+cd "$top" || fail "ПРИБОР_НЕДОСТУПЕН: корень дерева не открывается: $top"
+source "$top/scripts/witness-rules.sh" || fail "ПРИБОР_НЕДОСТУПЕН: witness-rules.sh"
+
+for tool in sed awk tail wc tr; do
+  command -v "$tool" >/dev/null || fail "ПРИБОР_НЕДОСТУПЕН: $tool"
+done
+FL=$(mktemp "${TMPDIR:-/tmp}/tweakcc-door-files.XXXXXX") || fail "ПРИБОР_НЕДОСТУПЕН: mktemp"
+MSH=$(mktemp "${TMPDIR:-/tmp}/tweakcc-door-status.XXXXXX") || fail "ПРИБОР_НЕДОСТУПЕН: mktemp"
+# CONSTRAINT: tree, names and statuses share one copied active index; write-tree must not take its index.lock.
+IDXSNAP=$(mktemp "${TMPDIR:-/tmp}/tweakcc-door-index.XXXXXX") || fail "ПРИБОР_НЕДОСТУПЕН: mktemp"
+index=$(git rev-parse --git-path index) || fail "ПРИБОР_НЕДОСТУПЕН: git rev-parse --git-path index"
+cp "$index" "$IDXSNAP" || fail "ПРИБОР_НЕДОСТУПЕН: копия индекса"
+T=$(GIT_INDEX_FILE="$IDXSNAP" git write-tree) || fail "ПРИБОР_НЕДОСТУПЕН: git write-tree отказ -- дерево свидетеля не построено"
+if git rev-parse -q --verify HEAD >/dev/null; then
+  GIT_INDEX_FILE="$IDXSNAP" git diff --cached -M -z --name-only HEAD > "$FL" \
+    || fail "ПРИБОР_НЕДОСТУПЕН: git diff --cached --name-only HEAD"
+  GIT_INDEX_FILE="$IDXSNAP" git diff --cached -M -z --name-status HEAD > "$MSH" \
+    || fail "ПРИБОР_НЕДОСТУПЕН: git diff --cached --name-status HEAD"
+else
+  GIT_INDEX_FILE="$IDXSNAP" git ls-files -z > "$FL" || fail "ПРИБОР_НЕДОСТУПЕН: git ls-files"
+  while IFS= read -r -d '' mp; do printf 'A\0%s\0' "$mp"; done < "$FL" > "$MSH" \
+    || fail "ПРИБОР_НЕДОСТУПЕН: список первого коммита"
+fi
+witness_status_mode "$MSH"
+witness_files "$FL"
+gd=$(git rev-parse --git-dir) || fail "ПРИБОР_НЕДОСТУПЕН: git rev-parse --git-dir (свидетель)"
+WIT="$gd/tweakcc-witness/$T"
+
+# CONSTRAINT: root and the entire encoded file list are shell arguments; the recipe must also work from a subdirectory.
+TOPQ=$(printf '%q' "$top")
+FQ=$(printf '%q' "$F")
+if [ -n "$F" ]; then
+  CMD="cd $TOPQ && bash scripts/run-witness.sh --tree $T --files $FQ"
+else
+  CMD="cd $TOPQ && bash scripts/run-witness.sh"
+fi
+
+# CONSTRAINT: парсер свидетеля строг к формату: парсер, ищущий строки «где-то
+# в файле», принимал смешанные rc, симлинки и свидетелей чужих машин. Список
+# файлов сверяется ТОЧНО: чужой список, даже широкий, не доказывает прогон
+# нашего набора.
+w_fail=""
+w_l1=""; w_l2=""; w_l3=""; w_l4=""
+if [ -L "$WIT" ]; then
+  w_fail="симлинк: свидетель дерева $T"
+elif [ ! -f "$WIT" ]; then
+  w_fail="отсутствует: свидетель дерева $T"
+else
+  w_l1=$(sed -n '1p' "$WIT")
+  w_l2=$(sed -n '2p' "$WIT")
+  w_l3=$(sed -n '3p' "$WIT")
+  w_l4=$(sed -n '4p' "$WIT")
+  # CONSTRAINT: счёт строк -- awk NR (незавершённая последняя строка -- тоже
+  # строка), и файл обязан кончаться переводом строки: wc -l не видел пятой
+  # строки без него. Сравнение строковое -- пустой результат отказавшего awk
+  # не равен 4.
+  w_n=$(awk 'END{print NR}' "$WIT")
+  w_nl=$(tail -c 1 "$WIT" | wc -l | tr -d ' ')
+  case "$w_l1" in
+    files=*) ;;
+    *) w_fail="формат: свидетель дерева $T не начинается с files=" ;;
+  esac
+  if [ -z "$w_fail" ] && [ "$w_l2" != "rc=0" ]; then
+    w_fail="rc≠0: свидетель дерева $T"
+  fi
+  if [ -z "$w_fail" ]; then
+    case "$w_l3" in
+      host=*) ;;
+      *) w_fail="формат: свидетель дерева $T без host=" ;;
+    esac
+  fi
+  if [ -z "$w_fail" ]; then
+    w_host="${w_l3#host=}"
+    if [ "$w_host" != "usbox" ]; then
+      w_fail="чужой хост: свидетель дерева $T выдан $w_host"
+    fi
+  fi
+  if [ -z "$w_fail" ]; then
+    case "$w_l4" in
+      mode=related|mode=full) ;;
+      *) w_fail="формат: свидетель дерева $T без mode=related|full" ;;
+    esac
+  fi
+  if [ -z "$w_fail" ] && [ "$w_n" != 4 ]; then
+    w_fail="формат: свидетель дерева $T не четыре строки"
+  fi
+  if [ -z "$w_fail" ] && [ "$w_nl" != 1 ]; then
+    w_fail="формат: свидетель дерева $T не кончается переводом строки"
+  fi
+  if [ -z "$w_fail" ] && [ "${w_l1#files=}" != "$F" ]; then
+    w_fail="другой список: свидетель дерева $T под ${w_l1#files=}, индекс -- $F"
+  fi
+  if [ -z "$w_fail" ]; then
+    w_mode="${w_l4#mode=}"
+    # CONSTRAINT: полный прогон поглощает related; related не покрывает full.
+    if [ "$w_mode" = "related" ] && [ "$needed" = "full" ]; then
+      w_fail="режим: свидетель дерева $T mode=related, изменение требует full"
+    fi
+  fi
+fi
+if [ -n "$w_fail" ]; then
+  printf 'дверь коммита: ОТКАЗ СВИДЕТЕЛЯ_НЕТ: %s; произвести: %s\n' "$w_fail" "$CMD" >&2
+  exit 1
+fi
+printf 'дверь коммита: прошло -- свидетель дерева %s под список %s (mode %s)\n' "$T" "$F" "${w_l4#mode=}"
+exit 0

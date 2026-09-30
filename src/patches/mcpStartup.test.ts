@@ -31,13 +31,19 @@ describe('writeMcpNonBlocking', () => {
 
   it('refuses when no consumer names the non-blocking branch', () => {
     // polarity unprovable: the flag exists but nothing tells us which way it runs
-    const noConsumer = REAL.replace('running fully async (nonblocking)', 'connected');
+    const noConsumer = REAL.replace(
+      'running fully async (nonblocking)',
+      'connected'
+    );
     expect(writeMcpNonBlocking(noConsumer)).toBeNull();
   });
 
   it('refuses when the flag no longer feeds that consumer', () => {
     // the consumer still exists, but a different variable is passed to it
-    const rewired = REAL.replace('b(e,()=>R(p),"regular")', 'b(zz,()=>R(p),"regular")');
+    const rewired = REAL.replace(
+      'b(e,()=>R(p),"regular")',
+      'b(zz,()=>R(p),"regular")'
+    );
     expect(writeMcpNonBlocking(rewired)).toBeNull();
   });
 

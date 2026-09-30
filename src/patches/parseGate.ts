@@ -5,7 +5,7 @@ import * as path from 'node:path';
 
 import chalk from 'chalk';
 
-import { MODULE_BOUNDARY_SPLIT_RE } from '../nativeInstallation';
+import { MODULE_BOUNDARY_SPLIT_RE } from '../moduleBoundary';
 
 export class PatchedBundleParseError extends Error {
   constructor(message: string) {
