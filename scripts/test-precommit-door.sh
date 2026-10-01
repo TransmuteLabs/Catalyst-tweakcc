@@ -9,9 +9,10 @@
 # CONSTRAINT: живой репозиторий не читается и не пишется ни в одном случае:
 # каждый случай строит свой git init в песочнице под ~/w523.
 #
-# CONSTRAINT: каждый зуб проверяется дважды: на настоящем хуке (зуб зелёный)
-# и под СВОЕЙ мутацией текста хука (зуб краснеет: мутированный хук ведёт себя
-# неверно). Зуб, не краснеющий под своей мутацией, -- вакуумный, стенд красный.
+# CONSTRAINT: каждый зуб проверяется дважды: на настоящем хуке и настоящем
+# составе дерева (зуб зелёный) и под СВОЕЙ мутацией -- текста хука или состава
+# базового дерева (зуб краснеет: мутированный вариант ведёт себя неверно).
+# Зуб, не краснеющий под своей мутацией, -- вакуумный, стенд красный.
 #
 # CONSTRAINT: заглушки ssh/rsync стоят на PATH каждого прогона двери и пишут
 # маркер вызова: дверь не имеет права звать сеть и удалённые прогоны; каждый
@@ -26,7 +27,7 @@
 # проходят списком через heredoc, не массивом: 3.2 массивы не обязан знать.
 set -u
 
-EXPECTED_TEETH=19
+EXPECTED_TEETH=20
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DOOR="$HERE/../.husky/pre-commit"
@@ -629,6 +630,72 @@ if [ "$rc" = 1 ] && [[ "$out" == *'ПРИБОР_НЕДОСТУПЕН: awk'* ]] &
   ok 'missing-awk: absent tool has its named refusal'; MUT_RED=$((MUT_RED+1)); mred missing-awk 'tool guard removed'
 else
   bad "missing-awk: rc=$rc mrc=$mrc [$out] [$mout]"
+fi
+
+# --- 20. коммит в свежем worktree исполняет дверь без pnpm install ------------------
+# CONSTRAINT: предмет этого зуба -- СОСТАВ базового дерева, не текст хука:
+# core.hooksPath резолвится от корня текущего worktree, и дверь в нём живёт
+# только потому, что .husky/_ трекается в репозитории. Мутация -- базовый
+# коммит без .husky/_: git молча пропускает хук, коммит обязан пройти тихо.
+mk_door_world() {   # <имя> <состав: tracked|no-underscore> -> путь песочницы с базовым коммитом
+  local r="$ROOT/$1" keep="$2"
+  mkdir -p "$r/src" "$r/scripts" "$r/home" "$r/tmp" "$r/.husky/_"
+  printf 'export const a = 1\n' > "$r/src/a.ts"
+  printf '# w\n' > "$r/README.md"
+  cp "$RULES" "$r/scripts/witness-rules.sh"
+  cp "$DOOR" "$r/.husky/pre-commit"
+  chmod 755 "$r/.husky/pre-commit"
+  if [ "$keep" = tracked ]; then
+    cp -p "$HERE"/../.husky/_/* "$r/.husky/_/"
+    cp -p "$HERE"/../.husky/_/.gitignore "$r/.husky/_/"
+  else
+    rmdir "$r/.husky/_"
+  fi
+  git -C "$r" init -q
+  git -C "$r" config user.email t@t
+  git -C "$r" config user.name t
+  git -C "$r" add -A
+  # CONSTRAINT: .husky/_/.gitignore со строкой * глушит собственное содержимое --
+  # в индекс его кладёт только -f, как и в живом репозитории.
+  git -C "$r" add -f .husky
+  # CONSTRAINT: hooksPath ставится ПОСЛЕ базового коммита: база не обязана
+  # иметь свидетеля, дверь проверяет только коммиты поверх неё.
+  git -C "$r" commit -qm base
+  git -C "$r" config core.hooksPath .husky/_
+  printf '%s' "$r"
+}
+run_wt_commit() {   # <репо>: коммит в свежем worktree; вывод на stdout, rc = код коммита
+  local r="$1" wt="$1-wt"
+  : > "$STUBMARK"
+  (cd "$r" && env HOME="$r/home" TMPDIR="$r/tmp" PATH="$STUBBIN:$PATH" \
+     git worktree add "$wt" -b wt >"$wt-add.log" 2>&1) || return 9
+  printf 'export const a = 2\n' > "$wt/src/a.ts"
+  git -C "$wt" add src/a.ts
+  (cd "$wt" && env HOME="$r/home" TMPDIR="$r/tmp" PATH="$STUBBIN:$PATH" \
+     git commit -m w 2>&1)
+}
+R=$(mk_door_world w20 tracked)
+base20=$(git -C "$R" rev-parse HEAD)
+out=$(run_wt_commit "$R"); rc=$?
+stubs=$(cat "$STUBMARK")
+head20=$(git -C "$R" rev-parse refs/heads/wt)
+TWT=$(git -C "$ROOT/w20-wt" write-tree)
+why=$(check_only "СВИДЕТЕЛЯ_НЕТ отсутствует" "$out")
+M=$(mk_door_world w20m no-underscore)
+mbase20=$(git -C "$M" rev-parse HEAD)
+mout=$(run_wt_commit "$M"); mrc=$?
+mstubs=$(cat "$STUBMARK")
+mhead20=$(git -C "$M" rev-parse refs/heads/wt)
+MUT_TOTAL=$((MUT_TOTAL+1))
+if (( rc == 1 )) && [ -z "$why" ] \
+   && [[ "$out" == *"дверь коммита: ОТКАЗ СВИДЕТЕЛЯ_НЕТ: отсутствует: свидетель дерева $TWT"* ]] \
+   && [ "$head20" = "$base20" ] && [ -z "$stubs" ] \
+   && (( mrc == 0 )) && [[ "$mout" != *"дверь коммита"* ]] && [[ "$mout" != *husky* ]] \
+   && [ "$mhead20" != "$mbase20" ] && [ -z "$mstubs" ]; then
+  ok "20) коммит в свежем worktree без pnpm install исполняет дверь: отказ называет дерево этого worktree; мутация состава красна"
+  MUT_RED=$((MUT_RED+1)); mred 20 "без .husky/_ в базовом коммите git молча пропустил хук"
+else
+  bad "20) ждали отказ двери в свежем worktree и тихий проход без .husky/_, получили rc=$rc mrc=$mrc head=$head20 base=$base20 mhead=$mhead20 mbase=$mbase20 $why[$out][$mout]"
 fi
 
 # --- итог ---------------------------------------------------------------------------

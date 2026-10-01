@@ -106,6 +106,13 @@ attempts; a leftover directory lock requires the printed manual removal command.
 
 The hook is tested under Bash 5.2 and Bash 3.2 `--posix`; `/bin/sh` on Mac and usbox is Bash; dash has not been tested.
 
+The door rides the repository through the tracked `.husky/_` directory: every
+worktree of this fork executes it without a local `pnpm install`. Three
+boundaries remain open, all measured properties of Git and husky rather than
+of this hook: a fresh clone before its first `pnpm install` has no
+`core.hooksPath`, `git commit -n` skips the hook, and `HUSKY=0` makes husky
+exit before the door runs.
+
 ### TypeScript Best Practices
 
 - Use strict type checking (enabled in `tsconfig.json`)
